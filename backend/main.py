@@ -16,6 +16,7 @@ import base64
 import contextlib
 import io
 import os
+import threading
 import time
 import uuid
 from html import escape
@@ -49,6 +50,13 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 SESSIONS: Dict[str, dict] = {}
 SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 horas
+
+# matplotlib.pyplot mantém estado global (figura atual etc.) que não é
+# thread-safe. Como o FastAPI executa rotas síncronas em threads paralelas,
+# duas chamadas simultâneas a AutoViz/Lux (ambas geram gráficos matplotlib)
+# podem corromper esse estado global e falhar de forma intermitente. Este
+# lock serializa qualquer trecho que gere gráficos.
+_MPL_LOCK = threading.Lock()
 
 
 def _cleanup_sessions() -> None:
@@ -204,16 +212,17 @@ def missingno_report(session_id: str):
         except Exception:  # noqa: BLE001
             return None
 
-    matrix = _capture(msno.matrix)
-    if matrix:
-        result["matrix"] = matrix
-    bar = _capture(msno.bar)
-    if bar:
-        result["bar"] = bar
-    if df.isna().sum().sum() > 0 and df.shape[1] > 1:
-        heatmap = _capture(msno.heatmap)
-        if heatmap:
-            result["heatmap"] = heatmap
+    with _MPL_LOCK:
+        matrix = _capture(msno.matrix)
+        if matrix:
+            result["matrix"] = matrix
+        bar = _capture(msno.bar)
+        if bar:
+            result["bar"] = bar
+        if df.isna().sum().sum() > 0 and df.shape[1] > 1:
+            heatmap = _capture(msno.heatmap)
+            if heatmap:
+                result["heatmap"] = heatmap
 
     if not result:
         raise HTTPException(status_code=500, detail="Não foi possível gerar nenhuma visualização de ausentes para esta base.")
@@ -243,22 +252,23 @@ def autoviz_report(session_id: str):
         df.to_csv(csv_path, index=False)
 
         av = AutoViz_Class()
-        av.AutoViz(
-            filename=csv_path,
-            sep=",",
-            depVar="",
-            dfte=None,
-            header=0,
-            # verbose=2 é o que faz o AutoViz de fato salvar os gráficos em
-            # disco (como PNG) em vez de apenas exibi-los inline — com
-            # verbose=0/1 nada é gravado em save_plot_dir.
-            verbose=2,
-            lowess=False,
-            chart_format="png",
-            max_rows_analyzed=min(len(df), 150000),
-            max_cols_analyzed=min(len(df.columns), 30),
-            save_plot_dir=tmp_dir,
-        )
+        with _MPL_LOCK:
+            av.AutoViz(
+                filename=csv_path,
+                sep=",",
+                depVar="",
+                dfte=None,
+                header=0,
+                # verbose=2 é o que faz o AutoViz de fato salvar os gráficos
+                # em disco (como PNG) em vez de apenas exibi-los inline — com
+                # verbose=0/1 nada é gravado em save_plot_dir.
+                verbose=2,
+                lowess=False,
+                chart_format="png",
+                max_rows_analyzed=min(len(df), 150000),
+                max_cols_analyzed=min(len(df.columns), 30),
+                save_plot_dir=tmp_dir,
+            )
         images = []
         for path in sorted(glob.glob(os.path.join(tmp_dir, "**", "*.png"), recursive=True)):
             with open(path, "rb") as f:
@@ -279,18 +289,19 @@ def lux_report(session_id: str):
     try:
         import lux  # noqa: F401  (registra o accessor .recommendation em pandas)
 
-        recommendation = df.recommendation or {}
-        items = []
-        for action, vis_list in recommendation.items():
-            for vis in list(vis_list)[:4]:
-                entry = {"name": f"{action}", "description": str(vis)}
-                try:
-                    chart = vis.to_matplotlib()
-                    fig = chart[0] if isinstance(chart, tuple) else chart
-                    entry["image"] = _fig_to_data_uri(fig)
-                except Exception:  # noqa: BLE001
-                    entry["image"] = None
-                items.append(entry)
+        with _MPL_LOCK:
+            recommendation = df.recommendation or {}
+            items = []
+            for action, vis_list in recommendation.items():
+                for vis in list(vis_list)[:4]:
+                    entry = {"name": f"{action}", "description": str(vis)}
+                    try:
+                        chart = vis.to_matplotlib()
+                        fig = chart[0] if isinstance(chart, tuple) else chart
+                        entry["image"] = _fig_to_data_uri(fig)
+                    except Exception:  # noqa: BLE001
+                        entry["image"] = None
+                    items.append(entry)
         return JSONResponse({"recommendations": items})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Falha ao gerar recomendações Lux: {exc}") from exc
