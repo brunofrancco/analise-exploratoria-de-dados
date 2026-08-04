@@ -3334,6 +3334,7 @@ function HypothesisTestsTab({ rows, columns, onLogAction }) {
 // Tiny safe arithmetic parser: columns are referenced as [Nome da Coluna]. No eval().
 function tokenizeFormula(expr) { return expr.match(/\[[^\]]+\]|\d+\.?\d*|\.\d+|[+\-*/()]/g) || []; }
 function parseFormulaTokens(tokens) {
+  if (!tokens.length) throw new Error("Fórmula vazia.");
   let pos = 0;
   const peek = () => tokens[pos];
   const next = () => tokens[pos++];
@@ -3349,12 +3350,16 @@ function parseFormulaTokens(tokens) {
   }
   function parseFactor() {
     const tok = peek();
-    if (tok === "(") { next(); const node = parseExpr(); if (peek() === ")") next(); return node; }
+    if (tok === undefined) throw new Error("Fórmula incompleta.");
+    if (tok === "(") { next(); const node = parseExpr(); if (peek() !== ")") throw new Error("Parêntese não fechado."); next(); return node; }
     if (tok === "-") { next(); return { type: "neg", value: parseFactor() }; }
-    if (tok && tok.startsWith("[")) { next(); return { type: "col", name: tok.slice(1, -1) }; }
-    next(); return { type: "num", value: Number(tok) };
+    if (tok.startsWith("[")) { next(); return { type: "col", name: tok.slice(1, -1) }; }
+    if (/^[\d.]/.test(tok)) { next(); return { type: "num", value: Number(tok) }; }
+    throw new Error(`Token inesperado: "${tok}".`);
   }
-  return parseExpr();
+  const root = parseExpr();
+  if (pos !== tokens.length) throw new Error(`Sintaxe inválida perto de "${tokens[pos]}" — verifique se falta um operador (+ − × ÷) entre os termos.`);
+  return root;
 }
 function evalFormulaNode(node, row) {
   if (!node) return NaN;
@@ -3424,7 +3429,7 @@ function FeatureEngineeringTab({ rows, columns, setRows, setColumns, onLogAction
       const values = rows.map((r) => { const v = evalFormulaNode(ast, r); return Number.isFinite(v) ? v : null; });
       const pyExpr = formulaExpr.replace(/\[([^\]]+)\]/g, "df['$1']");
       addColumn(formulaName || "nova_coluna", values, "numeric", `# Coluna derivada por fórmula\ndf['${formulaName || "nova_coluna"}'] = ${pyExpr}`, `Fórmula: ${formulaName} = ${formulaExpr}`);
-    } catch { showMsg("red", "Fórmula inválida."); }
+    } catch (err) { showMsg("red", err?.message || "Fórmula inválida."); }
   };
 
   const applyBinning = () => {
