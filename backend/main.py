@@ -2,9 +2,8 @@
 Backend da Análise Exploratória de Dados.
 
 API em FastAPI que recebe UMA base de dados (upload único) e a mantém em
-memória, compartilhada por sete endpoints — um por biblioteca de análise
-automática: ydata-profiling, Sweetviz, AutoViz, D-Tale, Lux, skimpy e
-missingno.
+memória, compartilhada pelos endpoints de análise automática: ydata-profiling
+e Sweetviz.
 
 Cada biblioteca é importada dentro da própria função de rota (import
 "preguiçoso"), de forma que, se uma delas falhar ao instalar/importar no
@@ -12,14 +11,10 @@ servidor, apenas aquele endpoint específico fica indisponível — o resto da
 API continua funcionando normalmente.
 """
 
-import base64
-import contextlib
 import io
 import os
-import threading
 import time
 import uuid
-from html import escape
 from typing import Dict
 
 import matplotlib
@@ -28,12 +23,7 @@ matplotlib.use("Agg")  # backend sem interface gráfica, necessário em servidor
 import pandas as pd
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse, JSONResponse
-
-# URL pública deste serviço depois do deploy (ajuste via variável de
-# ambiente PUBLIC_BASE_URL no Render). Usada para montar links absolutos,
-# por exemplo para a sessão interativa do D-Tale.
-PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://analise-exploratoria-backend.onrender.com")
+from fastapi.responses import HTMLResponse
 
 app = FastAPI(title="Análise Exploratória de Dados — API")
 
@@ -50,13 +40,6 @@ app.add_middleware(
 # ---------------------------------------------------------------------------
 SESSIONS: Dict[str, dict] = {}
 SESSION_TTL_SECONDS = 2 * 60 * 60  # 2 horas
-
-# matplotlib.pyplot mantém estado global (figura atual etc.) que não é
-# thread-safe. Como o FastAPI executa rotas síncronas em threads paralelas,
-# duas chamadas simultâneas a AutoViz/Lux (ambas geram gráficos matplotlib)
-# podem corromper esse estado global e falhar de forma intermitente. Este
-# lock serializa qualquer trecho que gere gráficos.
-_MPL_LOCK = threading.Lock()
 
 
 def _cleanup_sessions() -> None:
@@ -91,19 +74,6 @@ def _read_dataframe(filename: str, content: bytes) -> pd.DataFrame:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=400, detail=f"Falha ao ler o arquivo: {exc}") from exc
     raise HTTPException(status_code=400, detail="Formato não suportado. Use CSV, TSV, XLSX, XLS, JSON ou Parquet.")
-
-
-def _fig_to_data_uri(fig) -> str:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches="tight", dpi=110)
-    plt_close(fig)
-    buf.seek(0)
-    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("ascii")
-
-
-def plt_close(fig) -> None:
-    import matplotlib.pyplot as plt
-    plt.close(fig)
 
 
 # ---------------------------------------------------------------------------
@@ -166,182 +136,6 @@ def sweetviz_report(session_id: str):
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Falha ao gerar relatório Sweetviz: {exc}") from exc
     return HTMLResponse(content=html)
-
-
-# ---------------------------------------------------------------------------
-# skimpy — resumo estatístico do DataFrame
-# ---------------------------------------------------------------------------
-@app.get("/api/skimpy/{session_id}", response_class=HTMLResponse)
-def skimpy_report(session_id: str):
-    df = _get_df(session_id)
-    try:
-        from skimpy import skim
-        buf = io.StringIO()
-        with contextlib.redirect_stdout(buf):
-            skim(df)
-        text = buf.getvalue()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Falha ao gerar resumo skimpy: {exc}") from exc
-    html = (
-        "<!DOCTYPE html><html><head><meta charset='utf-8'>"
-        "<style>body{background:#12141A;color:#E8EAF0;margin:0;padding:20px;}"
-        "pre{font-family:'JetBrains Mono',Consolas,monospace;font-size:12.5px;white-space:pre-wrap;}</style>"
-        f"</head><body><pre>{escape(text)}</pre></body></html>"
-    )
-    return HTMLResponse(content=html)
-
-
-# ---------------------------------------------------------------------------
-# missingno — análise e visualização de valores ausentes
-# ---------------------------------------------------------------------------
-@app.get("/api/missingno/{session_id}")
-def missingno_report(session_id: str):
-    df = _get_df(session_id)
-    try:
-        import missingno as msno
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Biblioteca missingno indisponível: {exc}") from exc
-
-    result: Dict[str, str] = {}
-
-    def _capture(fn):
-        try:
-            ax = fn(df)
-            fig = ax.get_figure() if hasattr(ax, "get_figure") else ax
-            return _fig_to_data_uri(fig)
-        except Exception:  # noqa: BLE001
-            return None
-
-    with _MPL_LOCK:
-        matrix = _capture(msno.matrix)
-        if matrix:
-            result["matrix"] = matrix
-        bar = _capture(msno.bar)
-        if bar:
-            result["bar"] = bar
-        if df.isna().sum().sum() > 0 and df.shape[1] > 1:
-            heatmap = _capture(msno.heatmap)
-            if heatmap:
-                result["heatmap"] = heatmap
-
-    if not result:
-        raise HTTPException(status_code=500, detail="Não foi possível gerar nenhuma visualização de ausentes para esta base.")
-    return JSONResponse(result)
-
-
-# ---------------------------------------------------------------------------
-# AutoViz — geração automática de gráficos
-# ---------------------------------------------------------------------------
-@app.get("/api/autoviz/{session_id}")
-def autoviz_report(session_id: str):
-    df = _get_df(session_id)
-    import glob
-    import shutil
-    import tempfile
-
-    tmp_dir = tempfile.mkdtemp(prefix="autoviz_")
-    try:
-        from autoviz.AutoViz_Class import AutoViz_Class
-
-        # AutoViz é mais confiável quando recebe um arquivo real em disco do
-        # que quando recebe apenas um DataFrame via `dfte` com filename="" —
-        # essa combinação dispara, em algumas versões, o erro "Filename is an
-        # empty string or file not able to be loaded" mesmo com o DataFrame
-        # presente. Gravar um CSV temporário evita esse caminho de código.
-        csv_path = os.path.join(tmp_dir, "dataset.csv")
-        df.to_csv(csv_path, index=False)
-
-        av = AutoViz_Class()
-        with _MPL_LOCK:
-            av.AutoViz(
-                filename=csv_path,
-                sep=",",
-                depVar="",
-                dfte=None,
-                header=0,
-                # verbose=2 é o que faz o AutoViz de fato salvar os gráficos
-                # em disco (como PNG) em vez de apenas exibi-los inline — com
-                # verbose=0/1 nada é gravado em save_plot_dir.
-                verbose=2,
-                lowess=False,
-                chart_format="png",
-                max_rows_analyzed=min(len(df), 150000),
-                max_cols_analyzed=min(len(df.columns), 30),
-                save_plot_dir=tmp_dir,
-            )
-        images = []
-        for path in sorted(glob.glob(os.path.join(tmp_dir, "**", "*.png"), recursive=True)):
-            with open(path, "rb") as f:
-                images.append("data:image/png;base64," + base64.b64encode(f.read()).decode("ascii"))
-        return JSONResponse({"images": images})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Falha ao gerar gráficos com AutoViz: {exc}") from exc
-    finally:
-        shutil.rmtree(tmp_dir, ignore_errors=True)
-
-
-# ---------------------------------------------------------------------------
-# Lux — sugestão automática de visualizações
-# ---------------------------------------------------------------------------
-@app.get("/api/lux/{session_id}")
-def lux_report(session_id: str):
-    df = _get_df(session_id).copy()
-    try:
-        import lux  # noqa: F401  (registra o accessor .recommendation em pandas)
-
-        with _MPL_LOCK:
-            recommendation = df.recommendation or {}
-            items = []
-            for action, vis_list in recommendation.items():
-                for vis in list(vis_list)[:4]:
-                    entry = {"name": f"{action}", "description": str(vis)}
-                    try:
-                        chart = vis.to_matplotlib()
-                        fig = chart[0] if isinstance(chart, tuple) else chart
-                        entry["image"] = _fig_to_data_uri(fig)
-                    except Exception:  # noqa: BLE001
-                        entry["image"] = None
-                    items.append(entry)
-        return JSONResponse({"recommendations": items})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Falha ao gerar recomendações Lux: {exc}") from exc
-
-
-# ---------------------------------------------------------------------------
-# D-Tale — exploração interativa dos dados
-#
-# O bundle JS do D-Tale faz suas chamadas de API a partir da raiz do domínio
-# (ex.: /dtale/data/1), então embuti-lo sob um subcaminho (ex.: /dtale-app)
-# dentro do FastAPI — mesmo via ponte WSGI->ASGI — resulta em 404s dessas
-# chamadas e a tela fica em branco. A solução é rodar o D-Tale como um
-# serviço próprio, na raiz do seu domínio (ver backend/dtale_service.py),
-# publicado separadamente no Render. Este endpoint apenas repassa o
-# DataFrame da sessão para esse serviço e devolve a URL pronta.
-# ---------------------------------------------------------------------------
-DTALE_SERVICE_URL = os.environ.get("DTALE_SERVICE_URL", "").rstrip("/")
-
-
-@app.get("/api/dtale/{session_id}")
-def dtale_report(session_id: str):
-    df = _get_df(session_id)
-    if not DTALE_SERVICE_URL:
-        raise HTTPException(
-            status_code=503,
-            detail="Serviço do D-Tale não configurado (variável de ambiente DTALE_SERVICE_URL ausente).",
-        )
-    try:
-        import requests
-
-        payload = {
-            "columns": [str(c) for c in df.columns],
-            "rows": df.astype(object).where(pd.notnull(df), None).values.tolist(),
-        }
-        resp = requests.post(f"{DTALE_SERVICE_URL}/load-session", json=payload, timeout=60)
-        resp.raise_for_status()
-        path = resp.json()["path"]
-        return JSONResponse({"url": f"{DTALE_SERVICE_URL}{path}"})
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=500, detail=f"Falha ao iniciar o D-Tale: {exc}") from exc
 
 
 if __name__ == "__main__":
