@@ -17,7 +17,7 @@ import {
   RefreshCw, Share2, Filter, Calendar, ShieldCheck, ShieldAlert, TrendingDown,
   ArrowUpRight, ArrowDownRight, Zap, Target, Rocket, Flame, Radar as RadarIcon,
   Maximize2, Compass,
-  FileBarChart2, GitCompare, ExternalLink,
+  FileBarChart2, GitCompare, ExternalLink, Beaker, Wand2, Table2, ListChecks,
 } from "lucide-react";
 
 /* =========================================================================
@@ -204,6 +204,197 @@ function betai(a, b, x) {
   return 1 - (bt * betacf(1 - x, b, a)) / b;
 }
 function tTwoTailP(t, df) { return betai(df / 2, 0.5, df / (df + t * t)); }
+// Finds the critical t-value for a given two-tailed significance level (bisection over tTwoTailP).
+function tInvTwoTail(pTarget, df) {
+  let lo = 0, hi = 1000;
+  for (let i = 0; i < 80; i++) {
+    const mid = (lo + hi) / 2;
+    if (tTwoTailP(mid, df) > pTarget) lo = mid; else hi = mid;
+  }
+  return (lo + hi) / 2;
+}
+
+/* --- incomplete gamma function (Numerical-Recipes-style) — powers the chi-square test --- */
+function gser(a, x) {
+  const ITMAX = 200, EPS = 3e-9;
+  const gln = gammaln(a);
+  if (x <= 0) return { gamser: 0, gln };
+  let ap = a, sum = 1 / a, del = sum;
+  for (let n = 1; n <= ITMAX; n++) {
+    ap += 1; del *= x / ap; sum += del;
+    if (Math.abs(del) < Math.abs(sum) * EPS) break;
+  }
+  return { gamser: sum * Math.exp(-x + a * Math.log(x) - gln), gln };
+}
+function gcf(a, x) {
+  const ITMAX = 200, EPS = 3e-9, FPMIN = 1e-30;
+  const gln = gammaln(a);
+  let b = x + 1 - a, c = 1 / FPMIN, d = 1 / b, h = d;
+  for (let i = 1; i <= ITMAX; i++) {
+    const an = -i * (i - a);
+    b += 2;
+    d = an * d + b; if (Math.abs(d) < FPMIN) d = FPMIN;
+    c = b + an / c; if (Math.abs(c) < FPMIN) c = FPMIN;
+    d = 1 / d; const del = d * c; h *= del;
+    if (Math.abs(del - 1) < EPS) break;
+  }
+  return { gammcf: Math.exp(-x + a * Math.log(x) - gln) * h, gln };
+}
+function gammaP(a, x) { if (x < 0 || a <= 0) return NaN; return x < a + 1 ? gser(a, x).gamser : 1 - gcf(a, x).gammcf; }
+function gammaQ(a, x) { if (x < 0 || a <= 0) return NaN; return x < a + 1 ? 1 - gser(a, x).gamser : gcf(a, x).gammcf; }
+// Upper-tail p-value of the chi-square distribution — used by the chi-square test of independence.
+function chiSquareUpperP(x2, df) { return df > 0 ? Math.max(0, Math.min(1, gammaQ(df / 2, x2 / 2))) : NaN; }
+// Upper-tail p-value of the F distribution — used by ANOVA.
+function fUpperP(F, d1, d2) { if (F <= 0 || d1 <= 0 || d2 <= 0) return 1; return betai(d2 / 2, d1 / 2, d2 / (d2 + d1 * F)); }
+
+/* --- hypothesis tests & association measures (client-side, no backend needed) --- */
+function twoSampleTTest(a, b) {
+  const na = a.length, nb = b.length;
+  if (na < 2 || nb < 2) return null;
+  const ma = mean(a), mb = mean(b);
+  const va = variance(a, true), vb = variance(b, true);
+  const se = Math.sqrt(va / na + vb / nb);
+  const t = se !== 0 ? (ma - mb) / se : 0;
+  const df = (va / na + vb / nb) ** 2 / ((va / na) ** 2 / (na - 1) + (vb / nb) ** 2 / (nb - 1));
+  const p = Number.isFinite(df) && df > 0 ? tTwoTailP(t, df) : NaN;
+  const pooledSd = Math.sqrt(((na - 1) * va + (nb - 1) * vb) / (na + nb - 2));
+  const cohensD = pooledSd !== 0 ? (ma - mb) / pooledSd : NaN;
+  const tCrit = Number.isFinite(df) && df > 0 ? tInvTwoTail(0.05, df) : NaN;
+  const ciLow = (ma - mb) - tCrit * se, ciHigh = (ma - mb) + tCrit * se;
+  return { t, df, p, meanA: ma, meanB: mb, diff: ma - mb, ciLow, ciHigh, cohensD, na, nb };
+}
+function oneWayANOVA(groups) {
+  const clean = groups.filter((g) => g.length >= 2);
+  if (clean.length < 2) return null;
+  const allVals = clean.flat();
+  const grandMean = mean(allVals);
+  const k = clean.length, n = allVals.length;
+  const ssBetween = _.sum(clean.map((g) => g.length * (mean(g) - grandMean) ** 2));
+  const ssWithin = _.sum(clean.map((g) => _.sum(g.map((v) => (v - mean(g)) ** 2))));
+  const dfBetween = k - 1, dfWithin = n - k;
+  const msBetween = ssBetween / dfBetween, msWithin = dfWithin > 0 ? ssWithin / dfWithin : NaN;
+  const F = msWithin > 0 ? msBetween / msWithin : NaN;
+  const p = Number.isFinite(F) ? fUpperP(F, dfBetween, dfWithin) : NaN;
+  const ssTotal = ssBetween + ssWithin;
+  const etaSquared = ssTotal !== 0 ? ssBetween / ssTotal : NaN;
+  return { F, dfBetween, dfWithin, p, etaSquared, k, n, means: clean.map((g) => mean(g)) };
+}
+function chiSquareTest(catA, catB) {
+  const n = Math.min(catA.length, catB.length);
+  const levelsA = _.uniq(catA.slice(0, n)), levelsB = _.uniq(catB.slice(0, n));
+  const table = levelsA.map(() => levelsB.map(() => 0));
+  for (let i = 0; i < n; i++) {
+    const ai = levelsA.indexOf(catA[i]), bi = levelsB.indexOf(catB[i]);
+    table[ai][bi]++;
+  }
+  const rowSums = table.map((row) => _.sum(row));
+  const colSums = levelsB.map((_b, j) => _.sum(table.map((row) => row[j])));
+  let chi2 = 0;
+  for (let i = 0; i < levelsA.length; i++) for (let j = 0; j < levelsB.length; j++) {
+    const expected = (rowSums[i] * colSums[j]) / n;
+    if (expected > 0) chi2 += (table[i][j] - expected) ** 2 / expected;
+  }
+  const df = (levelsA.length - 1) * (levelsB.length - 1);
+  const p = df > 0 ? chiSquareUpperP(chi2, df) : NaN;
+  const minDim = Math.min(levelsA.length, levelsB.length);
+  const cramersV = df > 0 && minDim > 1 ? Math.sqrt(chi2 / (n * (minDim - 1))) : NaN;
+  return { chi2, df, p, cramersV, table, levelsA, levelsB, rowSums, colSums, n };
+}
+function pointBiserial(binaryVals, numericVals) { return pearson(binaryVals, numericVals); }
+function benjaminiHochberg(pvalues) {
+  const m = pvalues.length;
+  const idx = pvalues.map((p, i) => [Number.isNaN(p) ? 1 : p, i]).sort((a, b) => a[0] - b[0]);
+  const adjusted = new Array(m);
+  let prevMin = 1;
+  for (let rank = m; rank >= 1; rank--) {
+    const [p, origIdx] = idx[rank - 1];
+    const val = Math.min(prevMin, (p * m) / rank);
+    prevMin = val;
+    adjusted[origIdx] = Math.min(1, val);
+  }
+  return adjusted;
+}
+function bonferroniCorrect(pvalues) { const m = pvalues.length; return pvalues.map((p) => Math.min(1, p * m)); }
+function cohensDLabel(d) { const a = Math.abs(d); return a < 0.2 ? "desprezível" : a < 0.5 ? "pequeno" : a < 0.8 ? "médio" : "grande"; }
+function cramersVLabel(v) { if (Number.isNaN(v)) return "—"; return v < 0.1 ? "desprezível" : v < 0.3 ? "moderada" : v < 0.5 ? "forte" : "muito forte"; }
+function etaSquaredLabel(e) { if (Number.isNaN(e)) return "—"; return e < 0.01 ? "desprezível" : e < 0.06 ? "pequeno" : e < 0.14 ? "médio" : "grande"; }
+
+// Discretizes a numeric array into quantile bins (used by mutual information for continuous variables).
+function quantileBin(vals, nbins = 8) {
+  const sorted = [...vals].sort((a, b) => a - b);
+  const edges = [];
+  for (let i = 1; i < nbins; i++) edges.push(percentile(sorted, (i / nbins) * 100));
+  return vals.map((v) => { let b = 0; while (b < edges.length && v > edges[b]) b++; return b; });
+}
+// Normalized mutual information in [0,1] — captures non-linear associations Pearson/Spearman miss.
+function mutualInformation(xVals, yVals, xNumeric, yNumeric) {
+  const n = Math.min(xVals.length, yVals.length);
+  if (n < 4) return { mi: NaN, normalized: NaN };
+  const xb = (xNumeric ? quantileBin(xVals.slice(0, n)) : xVals.slice(0, n)).map(String);
+  const yb = (yNumeric ? quantileBin(yVals.slice(0, n)) : yVals.slice(0, n)).map(String);
+  const xCounts = {}, yCounts = {}, jointCounts = {};
+  for (let i = 0; i < n; i++) {
+    const jk = xb[i] + "" + yb[i];
+    xCounts[xb[i]] = (xCounts[xb[i]] || 0) + 1;
+    yCounts[yb[i]] = (yCounts[yb[i]] || 0) + 1;
+    jointCounts[jk] = (jointCounts[jk] || 0) + 1;
+  }
+  let mi = 0;
+  for (const jk in jointCounts) {
+    const sepIdx = jk.indexOf("");
+    const xk = jk.slice(0, sepIdx), yk = jk.slice(sepIdx + 1);
+    const pxy = jointCounts[jk] / n, px = xCounts[xk] / n, py = yCounts[yk] / n;
+    mi += pxy * Math.log2(pxy / (px * py));
+  }
+  const entropyOf = (counts) => -Object.values(counts).reduce((s, c) => { const p = c / n; return s + p * Math.log2(p); }, 0);
+  const hx = entropyOf(xCounts), hy = entropyOf(yCounts);
+  const norm = Math.min(hx, hy) > 0 ? mi / Math.min(hx, hy) : 0;
+  return { mi, normalized: Math.max(0, Math.min(1, norm)) };
+}
+
+/* --- time-series diagnostics: (augmented) Dickey-Fuller stationarity test + ACF/PACF --- */
+function adfTest(seriesVals) {
+  const n = seriesVals.length;
+  if (n < 12) return null;
+  const y = seriesVals.slice(1);
+  const yLag = seriesVals.slice(0, -1);
+  const dy = y.map((v, i) => v - yLag[i]);
+  const reg = multipleRegression(yLag.map((v) => [v]), dy);
+  if (!reg) return null;
+  const tStat = reg.coefStats[1]?.t;
+  const critical = { "1%": -3.43, "5%": -2.86, "10%": -2.57 };
+  return { tStat, critical, stationary: tStat < critical["5%"], n: dy.length };
+}
+function acfSeries(seriesVals, maxLag) {
+  const n = seriesVals.length;
+  const m = mean(seriesVals);
+  const c0 = _.sum(seriesVals.map((v) => (v - m) ** 2));
+  const out = [];
+  for (let k = 0; k <= maxLag; k++) {
+    let ck = 0;
+    for (let t = 0; t < n - k; t++) ck += (seriesVals[t] - m) * (seriesVals[t + k] - m);
+    out.push(c0 !== 0 ? ck / c0 : 0);
+  }
+  return out;
+}
+function pacfSeries(seriesVals, maxLag) {
+  const rho = acfSeries(seriesVals, maxLag);
+  const out = [1];
+  let prevPhi = [];
+  for (let k = 1; k <= maxLag; k++) {
+    if (k === 1) { out.push(rho[1]); prevPhi = [rho[1]]; continue; }
+    let num = rho[k];
+    for (let j = 0; j < k - 1; j++) num -= prevPhi[j] * rho[k - 1 - j];
+    let den = 1;
+    for (let j = 0; j < k - 1; j++) den -= prevPhi[j] * rho[j + 1];
+    const phik = den !== 0 ? num / den : 0;
+    const newPhi = prevPhi.map((pj, j) => pj - phik * prevPhi[k - 2 - j]);
+    newPhi.push(phik);
+    out.push(phik);
+    prevPhi = newPhi;
+  }
+  return out;
+}
 
 /* =========================================================================
    DATA LOADING / SCHEMA INFERENCE  (robust header + type detection)
@@ -2042,6 +2233,150 @@ function CorrelationHeatmap({ columns, rows, method = "pearson" }) {
 }
 
 /* =========================================================================
+   ASSOCIATION MATRIX — mede força de associação entre QUALQUER par de
+   variáveis (num-num = Pearson |r|, cat-cat = Cramér's V, num-cat = √η²
+   via ANOVA). Complementa a matriz de correlação, que só cobre numéricas.
+   ========================================================================= */
+function AssociationMatrix({ columns, rows }) {
+  const cols = columns.filter((c) => c.type === "numeric" || c.type === "categorical").slice(0, 12);
+  const data = useMemo(() => cols.map((ca) => cols.map((cb) => {
+    if (ca.name === cb.name) return { value: 1, method: "—" };
+    if (ca.type === "numeric" && cb.type === "numeric") {
+      const x = rows.map((r) => r[ca.name]).filter(isNum), y = rows.map((r) => r[cb.name]).filter(isNum);
+      const n = Math.min(x.length, y.length);
+      return { value: Math.abs(pearson(x.slice(0, n), y.slice(0, n))), method: "r" };
+    }
+    if (ca.type === "categorical" && cb.type === "categorical") {
+      const a = rows.map((r) => r[ca.name]).filter((v) => v !== null && v !== undefined);
+      const b = rows.map((r) => r[cb.name]).filter((v) => v !== null && v !== undefined);
+      const n = Math.min(a.length, b.length);
+      const res = chiSquareTest(a.slice(0, n), b.slice(0, n));
+      return { value: res.cramersV, method: "V" };
+    }
+    const numCol = ca.type === "numeric" ? ca.name : cb.name;
+    const catCol = ca.type === "numeric" ? cb.name : ca.name;
+    const catLevels = _.uniq(rows.map((r) => r[catCol]).filter((v) => v !== null && v !== undefined)).slice(0, 30);
+    const groups = catLevels.map((lv) => rows.filter((r) => r[catCol] === lv).map((r) => r[numCol]).filter(isNum));
+    const res = oneWayANOVA(groups);
+    return { value: res ? Math.sqrt(Math.max(0, res.etaSquared)) : NaN, method: "√η²" };
+  })), [cols.map((c) => c.name).join(","), rows]);
+
+  if (cols.length < 2) return <div style={{ color: T.sub, fontSize: 13 }}>É preciso de ao menos 2 colunas numéricas ou categóricas.</div>;
+  const cell = Math.min(58, Math.floor(560 / cols.length));
+  return (
+    <div>
+      <div style={{ overflowX: "auto" }}>
+        <div style={{ display: "grid", gridTemplateColumns: `130px repeat(${cols.length}, ${cell}px)`, gap: 2 }}>
+          <div />
+          {cols.map((c) => <div key={c.name} style={{ fontSize: 10, fontFamily: "'JetBrains Mono', monospace", color: T.sub, textAlign: "center", writingMode: "vertical-rl", height: 90, padding: 4 }}>{c.name}</div>)}
+          {cols.map((rowCol, i) => (
+            <React.Fragment key={rowCol.name}>
+              <div style={{ fontSize: 11, fontFamily: "'JetBrains Mono', monospace", color: T.sub, display: "flex", alignItems: "center", justifyContent: "flex-end", paddingRight: 8 }}>{rowCol.name}</div>
+              {cols.map((_c, j) => {
+                const cellData = data[i][j];
+                const v = Number.isNaN(cellData.value) ? 0 : cellData.value;
+                return (
+                  <div key={j} title={`${cellData.method}: ${fmt(cellData.value, 3)}`}
+                    style={{ width: cell, height: cell, background: HEAT_SCALE(v), display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontSize: 9, fontFamily: "'JetBrains Mono', monospace", color: v > 0.55 ? "#fff" : T.ink, borderRadius: 3 }}>
+                    <div>{fmt(cellData.value, 2)}</div>
+                    <div style={{ fontSize: 7.5, opacity: 0.8 }}>{cellData.method}</div>
+                  </div>
+                );
+              })}
+            </React.Fragment>
+          ))}
+        </div>
+      </div>
+      <div style={{ marginTop: 10, fontSize: 11.5, color: T.faint }}>
+        <b>r</b> = Pearson (numérica×numérica) · <b>V</b> = Cramér's V (categórica×categórica) · <b>√η²</b> = raiz do eta-quadrado da ANOVA (numérica×categórica). Todos em escala 0–1.
+      </div>
+    </div>
+  );
+}
+
+/* =========================================================================
+   STATIONARITY PANEL — teste de Dickey-Fuller (simplificado) + ACF/PACF
+   ========================================================================= */
+function StationarityPanel({ rows, dateCols, numericCols }) {
+  const [dateColName, setDateColName] = useState(dateCols[0]?.name || "");
+  const [numColName, setNumColName] = useState(numericCols[0]?.name || "");
+
+  const series = useMemo(() => {
+    if (!dateColName || !numColName) return [];
+    return rows.filter((r) => r[dateColName] instanceof Date && !Number.isNaN(+r[dateColName]) && isNum(r[numColName]))
+      .sort((a, b) => a[dateColName] - b[dateColName])
+      .map((r) => r[numColName]);
+  }, [rows, dateColName, numColName]);
+
+  const adf = useMemo(() => (series.length >= 12 ? adfTest(series) : null), [series]);
+  const maxLag = Math.min(20, Math.floor(series.length / 3));
+  const acfVals = useMemo(() => (series.length > maxLag ? acfSeries(series, maxLag) : []), [series, maxLag]);
+  const pacfVals = useMemo(() => (series.length > maxLag ? pacfSeries(series, maxLag) : []), [series, maxLag]);
+  const bound = series.length ? 1.96 / Math.sqrt(series.length) : 0;
+  const acfData = acfVals.map((v, k) => ({ lag: k, value: v }));
+  const pacfData = pacfVals.map((v, k) => ({ lag: k, value: v }));
+
+  if (!dateCols.length || !numericCols.length) return null;
+
+  return (
+    <Card style={{ padding: 20, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4, flexWrap: "wrap", gap: 8 }}>
+        <div style={{ fontWeight: 700, fontSize: 14, color: T.ink }}>Diagnósticos de série temporal (estacionariedade e autocorrelação)</div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <Select value={dateColName} onChange={setDateColName} options={dateCols.map((c) => c.name)} />
+          <Select value={numColName} onChange={setNumColName} options={numericCols.map((c) => c.name)} />
+        </div>
+      </div>
+      {series.length < 12 ? (
+        <div style={{ color: T.sub, fontSize: 13, marginTop: 10 }}>Dados insuficientes (mínimo 12 pontos válidos).</div>
+      ) : (
+        <>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12, margin: "14px 0" }}>
+            <StatTile label="Estatística ADF (t)" value={adf ? fmt(adf.tStat, 3) : "—"} />
+            <StatTile label="Valor crítico 5%" value={adf ? fmt(adf.critical["5%"], 2) : "—"} />
+            <StatTile label="Série estacionária?" value={adf ? (adf.stationary ? "Sim" : "Não") : "—"} tone={adf ? (adf.stationary ? "green" : "amber") : "neutral"} />
+          </div>
+          <div style={{ fontSize: 11.5, color: T.faint, marginBottom: 14 }}>
+            Teste de Dickey-Fuller (regressão Δy = α + γ·y₋₁ + ε; estatística t de γ comparada a valores críticos assintóticos de MacKinnon — aproximação, não um p-valor exato). t abaixo do valor crítico de 5% sugere estacionariedade.
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div>
+              <div style={{ fontSize: 12, color: T.sub, marginBottom: 8, fontWeight: 600 }}>ACF — autocorrelação</div>
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={acfData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
+                  <XAxis dataKey="lag" tick={{ fontSize: 9 }} />
+                  <YAxis domain={[-1, 1]} tick={{ fontSize: 10 }} />
+                  <ReferenceLine y={bound} stroke={T.faint} strokeDasharray="3 3" />
+                  <ReferenceLine y={-bound} stroke={T.faint} strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Bar dataKey="value" fill={T.teal} radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+            <div>
+              <div style={{ fontSize: 12, color: T.sub, marginBottom: 8, fontWeight: 600 }}>PACF — autocorrelação parcial</div>
+              <ResponsiveContainer width="100%" height={180}>
+                <BarChart data={pacfData}>
+                  <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
+                  <XAxis dataKey="lag" tick={{ fontSize: 9 }} />
+                  <YAxis domain={[-1, 1]} tick={{ fontSize: 10 }} />
+                  <ReferenceLine y={bound} stroke={T.faint} strokeDasharray="3 3" />
+                  <ReferenceLine y={-bound} stroke={T.faint} strokeDasharray="3 3" />
+                  <Tooltip />
+                  <Bar dataKey="value" fill={T.blue} radius={[2, 2, 0, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+          <div style={{ fontSize: 11.5, color: T.faint, marginTop: 10 }}>Linhas tracejadas = banda de significância aproximada (±1.96/√n).</div>
+        </>
+      )}
+    </Card>
+  );
+}
+
+/* =========================================================================
    EDA — DATA PROFILING (Dicionário de Dados) — reuses existing stat fns only
    ========================================================================= */
 function detectBooleanLike(uniqueStrings) {
@@ -2222,7 +2557,9 @@ function DataDictionaryTable({ C, dict, onSelect }) {
   );
 }
 
-function VariableProfileModal({ C, profile, rows, onClose }) {
+function VariableProfileModal({ C, profile, rows, onClose, notes, onAddNote, onRemoveNote }) {
+  const [noteDraft, setNoteDraft] = useState("");
+  const myNotes = useMemo(() => (notes || []).filter((n) => n.variable === profile?.name), [notes, profile?.name]);
   if (!profile) return null;
   const vals = profile.rawType === "numeric" ? rows.map((r) => r[profile.name]).filter(isNum) : [];
   const monthlyDist = useMemo(() => {
@@ -2318,6 +2655,27 @@ function VariableProfileModal({ C, profile, rows, onClose }) {
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {profile.exampleValues.map((v, i) => <Pill key={i}>{String(v)}</Pill>)}
         </div>
+
+        {onAddNote && (
+          <>
+            <div style={{ fontSize: 11.5, fontWeight: 700, color: C.sub, textTransform: "uppercase", marginTop: 18, marginBottom: 8 }}>Anotações desta variável</div>
+            {myNotes.length > 0 && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 10 }}>
+                {myNotes.map((n) => (
+                  <div key={n.id} style={{ display: "flex", justifyContent: "space-between", gap: 8, fontSize: 12.5, color: C.ink, background: C.bg, borderRadius: 8, padding: "8px 10px" }}>
+                    <div>{n.text}<div style={{ fontSize: 10.5, color: C.faint, marginTop: 2 }}>{new Date(n.createdAt).toLocaleString("pt-BR")}</div></div>
+                    <button onClick={() => onRemoveNote(n.id)} style={{ border: "none", background: "transparent", cursor: "pointer", color: C.red, flexShrink: 0 }}><Trash2 size={13} /></button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ display: "flex", gap: 8 }}>
+              <input value={noteDraft} onChange={(e) => setNoteDraft(e.target.value)} placeholder="Por que este outlier foi mantido? Alguma decisão a documentar?"
+                style={{ flex: 1, padding: "8px 10px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 12.5 }} />
+              <Btn icon={Plus} onClick={() => { if (noteDraft.trim()) { onAddNote(profile.name, noteDraft.trim()); setNoteDraft(""); } }}>Anotar</Btn>
+            </div>
+          </>
+        )}
       </div>
     </div>
   );
@@ -2401,7 +2759,7 @@ function ProfilingInsightsPanel({ C, dict, d }) {
   );
 }
 
-function EDATab({ rows, columns }) {
+function EDATab({ rows, columns, notes, onAddNote, onRemoveNote }) {
   const numericCols = columns.filter((c) => c.type === "numeric");
   const catCols = columns.filter((c) => c.type === "categorical");
   const dateCols = columns.filter((c) => c.type === "date");
@@ -2563,6 +2921,8 @@ function EDATab({ rows, columns }) {
 
       <TimeSeriesDecomposition rows={rows} dateCols={dateCols} numericCols={numericCols} />
 
+      <StationarityPanel rows={rows} dateCols={dateCols} numericCols={numericCols} />
+
       {timeSeries && timeSeries.length > 1 && (
         <Card style={{ padding: 20, marginBottom: 16 }}>
           <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, marginBottom: 12 }}>Série temporal — {numericCols[0].name} por {dateCols[0].name}</div>
@@ -2592,13 +2952,21 @@ function EDATab({ rows, columns }) {
         <CorrelationHeatmap columns={columns} rows={rows} method={corrMethod} />
       </Card>
 
+      <div style={{ marginTop: 16, marginBottom: 16 }}>
+        <Card style={{ padding: 20 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, marginBottom: 4 }}>Matriz de associação (todas as variáveis)</div>
+          <div style={{ fontSize: 12, color: T.sub, marginBottom: 14 }}>Combina numéricas e categóricas num único mapa de força de associação — cobre relações que a correlação de Pearson/Spearman não captura.</div>
+          <AssociationMatrix columns={columns} rows={rows} />
+        </Card>
+      </div>
+
       <div style={{ marginTop: 14, fontSize: 12, color: T.faint, display: "flex", gap: 6, alignItems: "center" }}>
         <Info size={13} /> Sunburst e mapas geográficos (lat/long) seguem no roadmap da próxima fase.
       </div>
         </>
       )}
 
-      {selectedVar && <VariableProfileModal C={T} profile={selectedVar} rows={rows} onClose={() => setSelectedVar(null)} />}
+      {selectedVar && <VariableProfileModal C={T} profile={selectedVar} rows={rows} onClose={() => setSelectedVar(null)} notes={notes} onAddNote={onAddNote} onRemoveNote={onRemoveNote} />}
     </div>
   );
 }
@@ -2670,6 +3038,874 @@ function DescriptiveTab({ rows, columns }) {
   );
 }
 
+/* =========================================================================
+   HYPOTHESIS TESTS TAB — t-test, ANOVA, qui-quadrado, correlação com p-valor
+   ========================================================================= */
+function conclusionSentence(p, alpha = 0.05) {
+  if (Number.isNaN(p)) return "Dados insuficientes para concluir.";
+  return p < alpha
+    ? `p ${fmtP(p)} < ${alpha} → há evidência estatística de diferença/associação (rejeita H₀).`
+    : `p ${fmtP(p)} ≥ ${alpha} → não há evidência estatística suficiente (não rejeita H₀).`;
+}
+
+function HypothesisTestsTab({ rows, columns, onLogAction }) {
+  const numericCols = columns.filter((c) => c.type === "numeric");
+  const catCols = columns.filter((c) => c.type === "categorical");
+  const MODES = [
+    { id: "ttest", label: "2 grupos (t-test)" },
+    { id: "anova", label: "Vários grupos (ANOVA)" },
+    { id: "chi2", label: "Categórica × categórica (χ²)" },
+    { id: "corr", label: "Correlação com significância" },
+  ];
+  const [mode, setMode] = useState("ttest");
+  const [catCol, setCatCol] = useState(catCols[0]?.name || "");
+  const [numCol, setNumCol] = useState(numericCols[0]?.name || "");
+  const [catCol2, setCatCol2] = useState(catCols[1]?.name || catCols[0]?.name || "");
+  const [numCol2, setNumCol2] = useState(numericCols[1]?.name || numericCols[0]?.name || "");
+  const [corrMethod, setCorrMethod] = useState("pearson");
+  const [levelA, setLevelA] = useState("");
+  const [levelB, setLevelB] = useState("");
+  const [correction, setCorrection] = useState("fdr");
+  const [batchCat, setBatchCat] = useState(catCols[0]?.name || "");
+
+  const levels = useMemo(() => {
+    if (!catCol) return [];
+    return _.uniq(rows.map((r) => r[catCol]).filter((v) => v !== null && v !== undefined)).slice(0, 40);
+  }, [rows, catCol]);
+
+  useEffect(() => {
+    if (levels.length) { setLevelA(levels[0]); setLevelB(levels.length > 1 ? levels[1] : levels[0]); }
+  }, [catCol, levels.join("|")]);
+
+  const ttestResult = useMemo(() => {
+    if (mode !== "ttest" || !catCol || !numCol || !levelA || !levelB || levelA === levelB) return null;
+    const a = rows.filter((r) => r[catCol] === levelA).map((r) => r[numCol]).filter(isNum);
+    const b = rows.filter((r) => r[catCol] === levelB).map((r) => r[numCol]).filter(isNum);
+    return twoSampleTTest(a, b);
+  }, [mode, rows, catCol, numCol, levelA, levelB]);
+
+  const anovaResult = useMemo(() => {
+    if (mode !== "anova" || !catCol || !numCol) return null;
+    const groups = levels.map((lv) => rows.filter((r) => r[catCol] === lv).map((r) => r[numCol]).filter(isNum));
+    return oneWayANOVA(groups);
+  }, [mode, rows, catCol, numCol, levels.join("|")]);
+
+  const chi2Result = useMemo(() => {
+    if (mode !== "chi2" || !catCol || !catCol2) return null;
+    const a = rows.map((r) => r[catCol]).filter((v) => v !== null && v !== undefined);
+    const b = rows.map((r) => r[catCol2]).filter((v) => v !== null && v !== undefined);
+    const n = Math.min(a.length, b.length);
+    return chiSquareTest(a.slice(0, n), b.slice(0, n));
+  }, [mode, rows, catCol, catCol2]);
+
+  const corrResult = useMemo(() => {
+    if (mode !== "corr" || !numCol || !numCol2) return null;
+    const x = rows.map((r) => r[numCol]).filter(isNum);
+    const y = rows.map((r) => r[numCol2]).filter(isNum);
+    const n = Math.min(x.length, y.length);
+    const r = corrMethod === "spearman" ? spearman(x.slice(0, n), y.slice(0, n)) : pearson(x.slice(0, n), y.slice(0, n));
+    const df = n - 2;
+    const t = df > 0 && Math.abs(r) < 1 ? (r * Math.sqrt(df / (1 - r * r))) : NaN;
+    const p = df > 0 ? tTwoTailP(t, df) : NaN;
+    return { r, n, df, p, method: corrMethod };
+  }, [mode, rows, numCol, numCol2, corrMethod]);
+
+  const batchResults = useMemo(() => {
+    if (!batchCat) return [];
+    const batchLevels = _.uniq(rows.map((r) => r[batchCat]).filter((v) => v !== null && v !== undefined)).slice(0, 40);
+    if (batchLevels.length < 2) return [];
+    return numericCols.map((c) => {
+      const groups = batchLevels.map((lv) => rows.filter((r) => r[batchCat] === lv).map((r) => r[c.name]).filter(isNum));
+      if (batchLevels.length === 2) {
+        const res = twoSampleTTest(groups[0], groups[1]);
+        return res ? { variable: c.name, test: "t-test", stat: res.t, p: res.p, effect: res.cohensD, effectLabel: cohensDLabel(res.cohensD) } : null;
+      }
+      const res = oneWayANOVA(groups);
+      return res ? { variable: c.name, test: "ANOVA", stat: res.F, p: res.p, effect: res.etaSquared, effectLabel: etaSquaredLabel(res.etaSquared) } : null;
+    }).filter(Boolean);
+  }, [rows, numericCols.map((c) => c.name).join(","), batchCat]);
+
+  const correctedP = useMemo(() => {
+    const pvals = batchResults.map((r) => r.p);
+    if (correction === "bonferroni") return bonferroniCorrect(pvals);
+    if (correction === "fdr") return benjaminiHochberg(pvals);
+    return pvals;
+  }, [batchResults, correction]);
+
+  const logTTest = () => {
+    if (!ttestResult) return;
+    onLogAction?.({
+      label: `t-test: ${numCol} entre "${levelA}" e "${levelB}" de ${catCol}`,
+      code: `# Teste t (Welch) — ${numCol} por ${catCol}\ngroup_a = df.loc[df['${catCol}'] == '${levelA}', '${numCol}'].dropna()\ngroup_b = df.loc[df['${catCol}'] == '${levelB}', '${numCol}'].dropna()\nt_stat, p_value = stats.ttest_ind(group_a, group_b, equal_var=False)\nprint(f"t={t_stat:.4f}, p={p_value:.4f}")`,
+    });
+  };
+  const logAnova = () => {
+    if (!anovaResult) return;
+    onLogAction?.({
+      label: `ANOVA: ${numCol} por ${catCol}`,
+      code: `# ANOVA de 1 fator — ${numCol} por ${catCol}\ngroups = [g['${numCol}'].dropna().values for _, g in df.groupby('${catCol}')]\nf_stat, p_value = stats.f_oneway(*groups)\nprint(f"F={f_stat:.4f}, p={p_value:.4f}")`,
+    });
+  };
+  const logChi2 = () => {
+    if (!chi2Result) return;
+    onLogAction?.({
+      label: `Qui-quadrado: ${catCol} × ${catCol2}`,
+      code: `# Qui-quadrado de independência — ${catCol} x ${catCol2}\ncontingency = pd.crosstab(df['${catCol}'], df['${catCol2}'])\nchi2, p_value, dof, expected = stats.chi2_contingency(contingency)\nprint(f"chi2={chi2:.4f}, p={p_value:.4f}")`,
+    });
+  };
+  const logCorr = () => {
+    if (!corrResult) return;
+    const fn = corrMethod === "spearman" ? "spearmanr" : "pearsonr";
+    onLogAction?.({
+      label: `Correlação (${corrMethod}): ${numCol} × ${numCol2}`,
+      code: `# Correlação ${corrMethod} com significância — ${numCol} x ${numCol2}\nr, p_value = stats.${fn}(df['${numCol}'].dropna(), df['${numCol2}'].dropna())\nprint(f"r={r:.4f}, p={p_value:.4f}")`,
+    });
+  };
+  const logBatch = () => {
+    if (!batchResults.length) return;
+    onLogAction?.({
+      label: `Testes em lote: todas as numéricas vs. "${batchCat}" (correção ${correction})`,
+      code: `# Testes em lote — cada variável numérica vs. ${batchCat}, com correção ${correction}\nfrom statsmodels.stats.multitest import multipletests\nresults = []\nfor col in ${JSON.stringify(numericCols.map((c) => c.name))}:\n    groups = [g[col].dropna().values for _, g in df.groupby('${batchCat}')]\n    groups = [g for g in groups if len(g) > 1]\n    if len(groups) == 2:\n        stat, p = stats.ttest_ind(*groups, equal_var=False)\n    else:\n        stat, p = stats.f_oneway(*groups)\n    results.append({"variavel": col, "estatistica": stat, "p": p})\nresults_df = pd.DataFrame(results)\n_, results_df["p_ajustado"], _, _ = multipletests(results_df["p"], method="${correction === "bonferroni" ? "bonferroni" : "fdr_bh"}")`,
+    });
+  };
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Inferência estatística" title="Testes de Hipótese"
+        right={<div style={{ fontSize: 11.5, color: T.faint, maxWidth: 280, textAlign: "right" }}>Nível de significância α = 0.05 em todos os testes.</div>} />
+
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+        {MODES.map((m) => {
+          const active = mode === m.id;
+          return (
+            <button key={m.id} onClick={() => setMode(m.id)}
+              style={{ padding: "9px 15px", borderRadius: 10, border: `1px solid ${active ? T.teal : T.border}`, background: active ? T.tealSoft : "#fff", cursor: "pointer", fontWeight: 700, fontSize: 12.5, color: active ? T.tealDark : T.ink }}>
+              {m.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {mode === "ttest" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+            <Select value={catCol} onChange={setCatCol} options={catCols.map((c) => c.name)} placeholder="Variável categórica (grupo)" />
+            <Select value={levelA} onChange={setLevelA} options={levels} placeholder="Grupo A" />
+            <Select value={levelB} onChange={setLevelB} options={levels} placeholder="Grupo B" />
+            <Select value={numCol} onChange={setNumCol} options={numericCols.map((c) => c.name)} placeholder="Variável numérica" />
+          </div>
+          {!catCols.length && <div style={{ color: T.sub, fontSize: 13 }}>É preciso de ao menos uma coluna categórica.</div>}
+          {ttestResult && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+                <StatTile label="t" value={fmt(ttestResult.t, 3)} />
+                <StatTile label="Graus de liberdade" value={fmt(ttestResult.df, 1)} />
+                <StatTile label="p-valor" value={fmtP(ttestResult.p)} tone={ttestResult.p < 0.05 ? "green" : "amber"} />
+                <StatTile label="Diferença de médias" value={fmt(ttestResult.diff, 3)} sub={`IC95%: [${fmt(ttestResult.ciLow, 2)}, ${fmt(ttestResult.ciHigh, 2)}]`} />
+                <StatTile label="Cohen's d" value={fmt(ttestResult.cohensD, 3)} sub={`efeito ${cohensDLabel(ttestResult.cohensD)}`} />
+              </div>
+              <div style={{ fontSize: 13, color: T.ink, marginBottom: 12 }}>{conclusionSentence(ttestResult.p)}</div>
+              <Btn variant="ghost" icon={FileCode} onClick={logTTest}>Adicionar ao script Python</Btn>
+            </>
+          )}
+        </Card>
+      )}
+
+      {mode === "anova" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+            <Select value={catCol} onChange={setCatCol} options={catCols.map((c) => c.name)} placeholder="Variável categórica (grupo)" />
+            <Select value={numCol} onChange={setNumCol} options={numericCols.map((c) => c.name)} placeholder="Variável numérica" />
+          </div>
+          {anovaResult && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+                <StatTile label="F" value={fmt(anovaResult.F, 3)} />
+                <StatTile label="df (entre / dentro)" value={`${anovaResult.dfBetween} / ${anovaResult.dfWithin}`} />
+                <StatTile label="p-valor" value={fmtP(anovaResult.p)} tone={anovaResult.p < 0.05 ? "green" : "amber"} />
+                <StatTile label="η² (eta-quadrado)" value={fmt(anovaResult.etaSquared, 3)} sub={`efeito ${etaSquaredLabel(anovaResult.etaSquared)}`} />
+                <StatTile label="Grupos (k)" value={anovaResult.k} />
+              </div>
+              <div style={{ fontSize: 13, color: T.ink, marginBottom: 12 }}>{conclusionSentence(anovaResult.p)}</div>
+              <Btn variant="ghost" icon={FileCode} onClick={logAnova}>Adicionar ao script Python</Btn>
+            </>
+          )}
+        </Card>
+      )}
+
+      {mode === "chi2" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+            <Select value={catCol} onChange={setCatCol} options={catCols.map((c) => c.name)} placeholder="Categórica A" />
+            <Select value={catCol2} onChange={setCatCol2} options={catCols.map((c) => c.name)} placeholder="Categórica B" />
+          </div>
+          {catCols.length < 2 && <div style={{ color: T.sub, fontSize: 13 }}>É preciso de ao menos 2 colunas categóricas.</div>}
+          {chi2Result && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+                <StatTile label="χ²" value={fmt(chi2Result.chi2, 3)} />
+                <StatTile label="Graus de liberdade" value={chi2Result.df} />
+                <StatTile label="p-valor" value={fmtP(chi2Result.p)} tone={chi2Result.p < 0.05 ? "green" : "amber"} />
+                <StatTile label="Cramér's V" value={fmt(chi2Result.cramersV, 3)} sub={`associação ${cramersVLabel(chi2Result.cramersV)}`} />
+                <StatTile label="N" value={chi2Result.n} />
+              </div>
+              <div style={{ fontSize: 13, color: T.ink, marginBottom: 12 }}>{conclusionSentence(chi2Result.p)}</div>
+              <Btn variant="ghost" icon={FileCode} onClick={logChi2}>Adicionar ao script Python</Btn>
+            </>
+          )}
+        </Card>
+      )}
+
+      {mode === "corr" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+            <Select value={numCol} onChange={setNumCol} options={numericCols.map((c) => c.name)} placeholder="Variável A" />
+            <Select value={numCol2} onChange={setNumCol2} options={numericCols.map((c) => c.name)} placeholder="Variável B" />
+            <Select value={corrMethod} onChange={setCorrMethod} options={[{ value: "pearson", label: "Pearson" }, { value: "spearman", label: "Spearman" }]} />
+          </div>
+          {corrResult && (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+                <StatTile label="r" value={fmt(corrResult.r, 3)} />
+                <StatTile label="N" value={corrResult.n} />
+                <StatTile label="Graus de liberdade" value={corrResult.df} />
+                <StatTile label="p-valor" value={fmtP(corrResult.p)} tone={corrResult.p < 0.05 ? "green" : "amber"} />
+              </div>
+              <div style={{ fontSize: 13, color: T.ink, marginBottom: 12 }}>{conclusionSentence(corrResult.p)}</div>
+              <Btn variant="ghost" icon={FileCode} onClick={logCorr}>Adicionar ao script Python</Btn>
+            </>
+          )}
+        </Card>
+      )}
+
+      <ReportDivider C={T} label="Testes em lote com correção para múltiplas comparações" />
+      <Card style={{ padding: 20 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16, alignItems: "center" }}>
+          <div style={{ fontSize: 12.5, color: T.sub }}>Testar todas as variáveis numéricas contra:</div>
+          <Select value={batchCat} onChange={setBatchCat} options={catCols.map((c) => c.name)} placeholder="Variável categórica alvo" />
+          <Select value={correction} onChange={setCorrection} options={[{ value: "fdr", label: "Correção FDR (Benjamini-Hochberg)" }, { value: "bonferroni", label: "Correção Bonferroni" }, { value: "none", label: "Sem correção" }]} />
+        </div>
+        {!batchResults.length && <div style={{ color: T.sub, fontSize: 13 }}>Selecione uma variável categórica com pelo menos 2 grupos.</div>}
+        {batchResults.length > 0 && (
+          <>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+                <thead>
+                  <tr style={{ borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>Variável</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>Teste</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>Estatística</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>p</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>p ajustado</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>Efeito</th>
+                    <th style={{ padding: "8px 10px", color: T.sub }}>Significativo?</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {batchResults.map((r, i) => (
+                    <tr key={r.variable} style={{ borderBottom: `1px solid ${T.border}` }}>
+                      <td style={{ padding: "8px 10px", fontWeight: 700, color: T.ink, fontFamily: "'JetBrains Mono', monospace" }}>{r.variable}</td>
+                      <td style={{ padding: "8px 10px", color: T.sub }}>{r.test}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{fmt(r.stat, 3)}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{fmtP(r.p)}</td>
+                      <td style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{fmtP(correctedP[i])}</td>
+                      <td style={{ padding: "8px 10px" }}>{r.effectLabel}</td>
+                      <td style={{ padding: "8px 10px" }}>
+                        {correctedP[i] < 0.05 ? <Pill tone="green">Sim</Pill> : <Pill tone="neutral">Não</Pill>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: 14 }}>
+              <Btn variant="ghost" icon={FileCode} onClick={logBatch}>Adicionar lote ao script Python</Btn>
+            </div>
+          </>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* =========================================================================
+   FEATURE ENGINEERING TAB — colunas por fórmula, binning, transformação, one-hot
+   ========================================================================= */
+// Tiny safe arithmetic parser: columns are referenced as [Nome da Coluna]. No eval().
+function tokenizeFormula(expr) { return expr.match(/\[[^\]]+\]|\d+\.?\d*|\.\d+|[+\-*/()]/g) || []; }
+function parseFormulaTokens(tokens) {
+  let pos = 0;
+  const peek = () => tokens[pos];
+  const next = () => tokens[pos++];
+  function parseExpr() {
+    let node = parseTerm();
+    while (peek() === "+" || peek() === "-") { const op = next(); node = { type: "bin", op, left: node, right: parseTerm() }; }
+    return node;
+  }
+  function parseTerm() {
+    let node = parseFactor();
+    while (peek() === "*" || peek() === "/") { const op = next(); node = { type: "bin", op, left: node, right: parseFactor() }; }
+    return node;
+  }
+  function parseFactor() {
+    const tok = peek();
+    if (tok === "(") { next(); const node = parseExpr(); if (peek() === ")") next(); return node; }
+    if (tok === "-") { next(); return { type: "neg", value: parseFactor() }; }
+    if (tok && tok.startsWith("[")) { next(); return { type: "col", name: tok.slice(1, -1) }; }
+    next(); return { type: "num", value: Number(tok) };
+  }
+  return parseExpr();
+}
+function evalFormulaNode(node, row) {
+  if (!node) return NaN;
+  if (node.type === "num") return node.value;
+  if (node.type === "col") { const v = row[node.name]; return isNum(v) ? v : NaN; }
+  if (node.type === "neg") return -evalFormulaNode(node.value, row);
+  if (node.type === "bin") {
+    const l = evalFormulaNode(node.left, row), r = evalFormulaNode(node.right, row);
+    if (node.op === "+") return l + r;
+    if (node.op === "-") return l - r;
+    if (node.op === "*") return l * r;
+    if (node.op === "/") return r !== 0 ? l / r : NaN;
+  }
+  return NaN;
+}
+function buildColumnMeta(name, values, type) {
+  const nonNull = values.filter((v) => v !== null && v !== undefined && !(typeof v === "number" && Number.isNaN(v)));
+  const missing = values.length - nonNull.length;
+  const uniqueVals = _.uniq(nonNull.map((v) => String(v)));
+  return { name, type, missing, missingPct: values.length ? (missing / values.length) * 100 : 0, unique: uniqueVals.length, numberStyle: "us", derived: true };
+}
+
+function FeatureEngineeringTab({ rows, columns, setRows, setColumns, onLogAction }) {
+  const numericCols = columns.filter((c) => c.type === "numeric");
+  const catCols = columns.filter((c) => c.type === "categorical");
+  const derivedCols = columns.filter((c) => c.derived);
+  const [subMode, setSubMode] = useState("formula");
+  const [msg, setMsg] = useState(null);
+
+  // formula
+  const [formulaName, setFormulaName] = useState("");
+  const [formulaExpr, setFormulaExpr] = useState("");
+  // binning
+  const [binCol, setBinCol] = useState(numericCols[0]?.name || "");
+  const [binMethod, setBinMethod] = useState("quantile");
+  const [binCount, setBinCount] = useState(4);
+  const [binName, setBinName] = useState("");
+  // transform
+  const [transCol, setTransCol] = useState(numericCols[0]?.name || "");
+  const [transType, setTransType] = useState("log1p");
+  const [transName, setTransName] = useState("");
+  // one-hot
+  const [oheCol, setOheCol] = useState(catCols[0]?.name || "");
+  const [oheTopN, setOheTopN] = useState(5);
+
+  const showMsg = (tone, text) => setMsg({ tone, text });
+
+  const addColumn = (name, values, type, pythonCode, label) => {
+    if (!name.trim()) { showMsg("amber", "Dê um nome à nova coluna."); return; }
+    if (columns.some((c) => c.name === name)) { showMsg("amber", "Já existe uma coluna com esse nome."); return; }
+    const meta = buildColumnMeta(name, values, type);
+    setColumns((prev) => [...prev, meta]);
+    setRows((prev) => prev.map((r, i) => ({ ...r, [name]: values[i] })));
+    onLogAction?.({ label, code: pythonCode });
+    showMsg("green", `Coluna "${name}" criada com sucesso.`);
+  };
+
+  const removeColumn = (name) => {
+    setColumns((prev) => prev.filter((c) => c.name !== name));
+    setRows((prev) => prev.map((r) => { const { [name]: _drop, ...rest } = r; return rest; }));
+  };
+
+  const applyFormula = () => {
+    if (!formulaExpr.trim()) { showMsg("amber", "Escreva uma fórmula usando [Nome da Coluna]."); return; }
+    try {
+      const ast = parseFormulaTokens(tokenizeFormula(formulaExpr));
+      const values = rows.map((r) => { const v = evalFormulaNode(ast, r); return Number.isFinite(v) ? v : null; });
+      const pyExpr = formulaExpr.replace(/\[([^\]]+)\]/g, "df['$1']");
+      addColumn(formulaName || "nova_coluna", values, "numeric", `# Coluna derivada por fórmula\ndf['${formulaName || "nova_coluna"}'] = ${pyExpr}`, `Fórmula: ${formulaName} = ${formulaExpr}`);
+    } catch { showMsg("red", "Fórmula inválida."); }
+  };
+
+  const applyBinning = () => {
+    const vals = rows.map((r) => r[binCol]);
+    const name = binName || `${binCol}_faixa`;
+    let edges = [];
+    const numericVals = vals.filter(isNum);
+    if (!numericVals.length) { showMsg("amber", "Coluna sem valores numéricos suficientes."); return; }
+    if (binMethod === "quantile") {
+      for (let i = 1; i < binCount; i++) edges.push(percentile(numericVals, (i / binCount) * 100));
+    } else {
+      const lo = Math.min(...numericVals), hi = Math.max(...numericVals);
+      for (let i = 1; i < binCount; i++) edges.push(lo + ((hi - lo) * i) / binCount);
+    }
+    edges = _.uniq(edges);
+    const values = vals.map((v) => {
+      if (!isNum(v)) return null;
+      let b = 0; while (b < edges.length && v > edges[b]) b++;
+      return `Faixa ${b + 1}`;
+    });
+    const pyMethod = binMethod === "quantile" ? `pd.qcut(df['${binCol}'], q=${binCount}, labels=[f"Faixa {i+1}" for i in range(${binCount})], duplicates='drop')` : `pd.cut(df['${binCol}'], bins=${binCount}, labels=[f"Faixa {i+1}" for i in range(${binCount})])`;
+    addColumn(name, values, "categorical", `# Binning (${binMethod}) de ${binCol}\ndf['${name}'] = ${pyMethod}`, `Binning: ${name} (${binMethod}, ${binCount} faixas)`);
+  };
+
+  const applyTransform = () => {
+    const vals = rows.map((r) => r[transCol]);
+    const name = transName || `${transCol}_${transType}`;
+    let values, pyCode;
+    if (transType === "log1p") { values = vals.map((v) => isNum(v) && v > -1 ? Math.log1p(v) : null); pyCode = `np.log1p(df['${transCol}'])`; }
+    else if (transType === "sqrt") { values = vals.map((v) => isNum(v) && v >= 0 ? Math.sqrt(v) : null); pyCode = `np.sqrt(df['${transCol}'])`; }
+    else if (transType === "zscore") {
+      const numericVals = vals.filter(isNum);
+      const m = mean(numericVals), s = std(numericVals, true);
+      values = vals.map((v) => isNum(v) && s ? (v - m) / s : null);
+      pyCode = `(df['${transCol}'] - df['${transCol}'].mean()) / df['${transCol}'].std()`;
+    } else {
+      const numericVals = vals.filter(isNum);
+      const lo = Math.min(...numericVals), hi = Math.max(...numericVals);
+      values = vals.map((v) => isNum(v) && hi !== lo ? (v - lo) / (hi - lo) : null);
+      pyCode = `(df['${transCol}'] - df['${transCol}'].min()) / (df['${transCol}'].max() - df['${transCol}'].min())`;
+    }
+    addColumn(name, values, "numeric", `# Transformação (${transType}) de ${transCol}\ndf['${name}'] = ${pyCode}`, `Transformação: ${name} (${transType})`);
+  };
+
+  const applyOneHot = () => {
+    if (!oheCol) return;
+    const counts = _.countBy(rows.map((r) => r[oheCol]).filter((v) => v !== null && v !== undefined));
+    const topCats = Object.entries(counts).sort((a, b) => b[1] - a[1]).slice(0, oheTopN).map(([k]) => k);
+    setColumns((prev) => {
+      const newCols = topCats.map((cat) => buildColumnMeta(`${oheCol}_${cat}`, rows.map((r) => (String(r[oheCol]) === cat ? 1 : 0)), "numeric"));
+      return [...prev, ...newCols];
+    });
+    setRows((prev) => prev.map((r) => {
+      const extra = {};
+      topCats.forEach((cat) => { extra[`${oheCol}_${cat}`] = String(r[oheCol]) === cat ? 1 : 0; });
+      return { ...r, ...extra };
+    }));
+    onLogAction?.({ label: `One-hot encoding: ${oheCol} (top ${oheTopN})`, code: `# One-hot encoding — ${oheCol} (top ${oheTopN} categorias)\ntop_cats = df['${oheCol}'].value_counts().head(${oheTopN}).index\nfor cat in top_cats:\n    df[f"${oheCol}_{cat}"] = (df['${oheCol}'] == cat).astype(int)` });
+    showMsg("green", `${topCats.length} colunas one-hot criadas a partir de "${oheCol}".`);
+  };
+
+  const SUBMODES = [
+    { id: "formula", label: "Fórmula" },
+    { id: "binning", label: "Binning" },
+    { id: "transform", label: "Transformação" },
+    { id: "onehot", label: "One-hot encoding" },
+  ];
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Preparação de dados" title="Engenharia de Features" />
+      <div style={{ display: "flex", gap: 8, marginBottom: 18, flexWrap: "wrap" }}>
+        {SUBMODES.map((m) => {
+          const active = subMode === m.id;
+          return (
+            <button key={m.id} onClick={() => { setSubMode(m.id); setMsg(null); }}
+              style={{ padding: "9px 15px", borderRadius: 10, border: `1px solid ${active ? T.teal : T.border}`, background: active ? T.tealSoft : "#fff", cursor: "pointer", fontWeight: 700, fontSize: 12.5, color: active ? T.tealDark : T.ink }}>
+              {m.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {subMode === "formula" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontSize: 12.5, color: T.sub, marginBottom: 10 }}>
+            Use <code>[Nome da Coluna]</code> para referenciar colunas numéricas. Operadores: + − × ÷ e parênteses.
+          </div>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 10 }}>
+            {numericCols.map((c) => (
+              <button key={c.name} onClick={() => setFormulaExpr((e) => e + `[${c.name}]`)}
+                style={{ fontSize: 11, padding: "4px 8px", borderRadius: 6, border: `1px solid ${T.border}`, background: "#fff", cursor: "pointer", fontFamily: "'JetBrains Mono', monospace" }}>
+                {c.name}
+              </button>
+            ))}
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <input placeholder="Nome da nova coluna" value={formulaName} onChange={(e) => setFormulaName(e.target.value)}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, minWidth: 200 }} />
+            <input placeholder="Ex.: [Receita] / [Unidades]" value={formulaExpr} onChange={(e) => setFormulaExpr(e.target.value)}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, flex: 1, minWidth: 240, fontFamily: "'JetBrains Mono', monospace" }} />
+            <Btn icon={Plus} onClick={applyFormula}>Criar coluna</Btn>
+          </div>
+        </Card>
+      )}
+
+      {subMode === "binning" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Select value={binCol} onChange={setBinCol} options={numericCols.map((c) => c.name)} />
+            <Select value={binMethod} onChange={setBinMethod} options={[{ value: "quantile", label: "Quantis (mesmo N por faixa)" }, { value: "equalwidth", label: "Largura igual" }]} />
+            <input type="number" min={2} max={20} value={binCount} onChange={(e) => setBinCount(Math.max(2, Math.min(20, +e.target.value || 2)))}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 90 }} />
+            <input placeholder="Nome da nova coluna (opcional)" value={binName} onChange={(e) => setBinName(e.target.value)}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, minWidth: 200 }} />
+            <Btn icon={Plus} onClick={applyBinning}>Criar coluna</Btn>
+          </div>
+        </Card>
+      )}
+
+      {subMode === "transform" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <Select value={transCol} onChange={setTransCol} options={numericCols.map((c) => c.name)} />
+            <Select value={transType} onChange={setTransType} options={[{ value: "log1p", label: "log(1+x)" }, { value: "sqrt", label: "Raiz quadrada" }, { value: "zscore", label: "Padronização (z-score)" }, { value: "minmax", label: "Normalização (min-max)" }]} />
+            <input placeholder="Nome da nova coluna (opcional)" value={transName} onChange={(e) => setTransName(e.target.value)}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, minWidth: 200 }} />
+            <Btn icon={Plus} onClick={applyTransform}>Criar coluna</Btn>
+          </div>
+        </Card>
+      )}
+
+      {subMode === "onehot" && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+            <Select value={oheCol} onChange={setOheCol} options={catCols.map((c) => c.name)} />
+            <div style={{ fontSize: 12.5, color: T.sub }}>Top</div>
+            <input type="number" min={2} max={20} value={oheTopN} onChange={(e) => setOheTopN(Math.max(2, Math.min(20, +e.target.value || 2)))}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 80 }} />
+            <div style={{ fontSize: 12.5, color: T.sub }}>categorias mais frequentes</div>
+            <Btn icon={Plus} onClick={applyOneHot}>Criar colunas</Btn>
+          </div>
+        </Card>
+      )}
+
+      {msg && <div style={{ marginBottom: 16, fontSize: 12.5, color: T[msg.tone] || T.sub, background: msg.tone === "green" ? T.greenSoft : msg.tone === "red" ? T.redSoft : T.amberSoft, padding: 10, borderRadius: 8 }}>{msg.text}</div>}
+
+      <ReportDivider C={T} label="Colunas derivadas nesta sessão" />
+      <Card style={{ padding: 20 }}>
+        {!derivedCols.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhuma coluna derivada ainda. Use as ferramentas acima para criar features.</div>}
+        {derivedCols.length > 0 && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {derivedCols.map((c) => (
+              <div key={c.name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 10px", background: T.bg, borderRadius: 8 }}>
+                <div style={{ fontSize: 12.5, fontFamily: "'JetBrains Mono', monospace", color: T.ink }}>{c.name} <span style={{ color: T.faint }}>({c.type})</span></div>
+                <button onClick={() => removeColumn(c.name)} style={{ border: "none", background: "transparent", cursor: "pointer", color: T.red }}><Trash2 size={14} /></button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Card>
+    </div>
+  );
+}
+
+/* =========================================================================
+   GROUP COMPARISON TAB — group-by / pivot com teste estatístico integrado
+   ========================================================================= */
+function aggregateValues(vals, method) {
+  if (method === "count") return vals.length;
+  const nums = vals.filter(isNum);
+  if (!nums.length) return NaN;
+  if (method === "mean") return mean(nums);
+  if (method === "median") return median(nums);
+  if (method === "sum") return _.sum(nums);
+  if (method === "std") return std(nums, true);
+  if (method === "min") return Math.min(...nums);
+  if (method === "max") return Math.max(...nums);
+  return NaN;
+}
+const AGG_LABELS = { mean: "Média", median: "Mediana", sum: "Soma", std: "Desvio padrão", min: "Mínimo", max: "Máximo", count: "Contagem" };
+const AGG_PY = { mean: "mean", median: "median", sum: "sum", std: "std", min: "min", max: "max", count: "count" };
+
+function GroupComparisonTab({ rows, columns, onLogAction }) {
+  const numericCols = columns.filter((c) => c.type === "numeric");
+  const catCols = columns.filter((c) => c.type === "categorical");
+  const [groupCol, setGroupCol] = useState(catCols[0]?.name || "");
+  const [breakCol, setBreakCol] = useState("");
+  const [metricCol, setMetricCol] = useState(numericCols[0]?.name || "");
+  const [agg, setAgg] = useState("mean");
+
+  const levels = useMemo(() => (groupCol ? _.uniq(rows.map((r) => r[groupCol]).filter((v) => v !== null && v !== undefined)).slice(0, 30) : []), [rows, groupCol]);
+  const breakLevels = useMemo(() => (breakCol ? _.uniq(rows.map((r) => r[breakCol]).filter((v) => v !== null && v !== undefined)).slice(0, 12) : []), [rows, breakCol]);
+
+  const groupTable = useMemo(() => {
+    if (!groupCol || !metricCol) return [];
+    return levels.map((lv) => {
+      const subset = rows.filter((r) => r[groupCol] === lv).map((r) => r[metricCol]);
+      return { group: String(lv), n: subset.filter((v) => v !== null && v !== undefined).length, value: aggregateValues(subset, agg) };
+    });
+  }, [rows, groupCol, metricCol, agg, levels.join("|")]);
+
+  const pivotTable = useMemo(() => {
+    if (!groupCol || !breakCol || !metricCol) return null;
+    return levels.map((lv) => ({
+      group: String(lv),
+      cells: breakLevels.map((bl) => {
+        const subset = rows.filter((r) => r[groupCol] === lv && r[breakCol] === bl).map((r) => r[metricCol]);
+        return aggregateValues(subset, agg);
+      }),
+    }));
+  }, [rows, groupCol, breakCol, metricCol, agg, levels.join("|"), breakLevels.join("|")]);
+
+  const testResult = useMemo(() => {
+    if (!groupCol || !metricCol || levels.length < 2) return null;
+    const groups = levels.map((lv) => rows.filter((r) => r[groupCol] === lv).map((r) => r[metricCol]).filter(isNum));
+    if (levels.length === 2) { const res = twoSampleTTest(groups[0], groups[1]); return res ? { kind: "t-test", ...res } : null; }
+    const res = oneWayANOVA(groups);
+    return res ? { kind: "ANOVA", ...res } : null;
+  }, [rows, groupCol, metricCol, levels.join("|")]);
+
+  const logGroupBy = () => {
+    onLogAction?.({
+      label: `Group-by: ${metricCol} agregado (${agg}) por ${groupCol}`,
+      code: `# Comparação de grupos\ndf.groupby('${groupCol}')['${metricCol}'].${AGG_PY[agg]}()${breakCol ? `\n# Pivot com quebra adicional\npd.pivot_table(df, values='${metricCol}', index='${groupCol}', columns='${breakCol}', aggfunc='${AGG_PY[agg]}')` : ""}`,
+    });
+  };
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Análise por grupo" title="Comparação de Grupos (Pivot)" />
+      <Card style={{ padding: 20, marginBottom: 16 }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          <Select value={groupCol} onChange={setGroupCol} options={catCols.map((c) => c.name)} placeholder="Agrupar por" />
+          <Select value={breakCol} onChange={setBreakCol} options={catCols.filter((c) => c.name !== groupCol).map((c) => c.name)} placeholder="Quebrar por (opcional)" />
+          <Select value={metricCol} onChange={setMetricCol} options={numericCols.map((c) => c.name)} placeholder="Métrica" />
+          <Select value={agg} onChange={setAgg} options={Object.entries(AGG_LABELS).map(([value, label]) => ({ value, label }))} />
+        </div>
+      </Card>
+
+      {!pivotTable && groupTable.length > 0 && (
+        <Card style={{ padding: 20, marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, marginBottom: 12 }}>{AGG_LABELS[agg]} de {metricCol} por {groupCol}</div>
+          <ResponsiveContainer width="100%" height={240}>
+            <BarChart data={groupTable}>
+              <CartesianGrid strokeDasharray="3 3" stroke={T.border} />
+              <XAxis dataKey="group" tick={{ fontSize: 10 }} />
+              <YAxis tick={{ fontSize: 10 }} />
+              <Tooltip />
+              <Bar dataKey="value" fill={T.teal} radius={[3, 3, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+          <div style={{ overflowX: "auto", marginTop: 16 }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>{groupCol}</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>N</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>{AGG_LABELS[agg]}</th>
+                </tr>
+              </thead>
+              <tbody>
+                {groupTable.map((r) => (
+                  <tr key={r.group} style={{ borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: "8px 10px", fontWeight: 700, color: T.ink }}>{r.group}</td>
+                    <td style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{r.n}</td>
+                    <td style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{fmt(r.value, 3)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Card>
+      )}
+
+      {pivotTable && (
+        <Card style={{ padding: 20, marginBottom: 16, overflowX: "auto" }}>
+          <div style={{ fontWeight: 700, fontSize: 14, color: T.ink, marginBottom: 12 }}>Pivot: {AGG_LABELS[agg]} de {metricCol} — {groupCol} × {breakCol}</div>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, minWidth: 500 }}>
+            <thead>
+              <tr style={{ borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+                <th style={{ padding: "8px 10px", color: T.sub }}>{groupCol} \ {breakCol}</th>
+                {breakLevels.map((bl) => <th key={bl} style={{ padding: "8px 10px", color: T.sub, whiteSpace: "nowrap" }}>{String(bl)}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {pivotTable.map((row) => (
+                <tr key={row.group} style={{ borderBottom: `1px solid ${T.border}` }}>
+                  <td style={{ padding: "8px 10px", fontWeight: 700, color: T.ink }}>{row.group}</td>
+                  {row.cells.map((v, j) => <td key={j} style={{ padding: "8px 10px", fontFamily: "'JetBrains Mono', monospace" }}>{fmt(v, 2)}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </Card>
+      )}
+
+      <Btn variant="ghost" icon={FileCode} onClick={logGroupBy} style={{ marginBottom: 16 }}>Adicionar ao script Python</Btn>
+
+      {testResult && (
+        <>
+          <ReportDivider C={T} label="Diferença entre grupos é estatisticamente significativa?" />
+          <Card style={{ padding: 20 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12, marginBottom: 14 }}>
+              <StatTile label={testResult.kind} value={fmt(testResult.kind === "t-test" ? testResult.t : testResult.F, 3)} />
+              <StatTile label="p-valor" value={fmtP(testResult.p)} tone={testResult.p < 0.05 ? "green" : "amber"} />
+              <StatTile label="Tamanho de efeito" value={fmt(testResult.kind === "t-test" ? testResult.cohensD : testResult.etaSquared, 3)}
+                sub={testResult.kind === "t-test" ? cohensDLabel(testResult.cohensD) : etaSquaredLabel(testResult.etaSquared)} />
+            </div>
+            <div style={{ fontSize: 13, color: T.ink }}>{conclusionSentence(testResult.p)}</div>
+          </Card>
+        </>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
+   DATA QUALITY RULES TAB — data-contracts leve, validado contra a base ativa
+   ========================================================================= */
+const RULE_TYPE_LABELS = { notnull: "Completude mínima", range: "Intervalo numérico", allowed: "Valores permitidos", regex: "Padrão (regex)", unique: "Unicidade mínima" };
+const QUALITY_RULES_KEY = "analisepro_quality_rules_v1";
+
+function loadQualityRules() {
+  try { return JSON.parse(localStorage.getItem(QUALITY_RULES_KEY) || "[]"); } catch { return []; }
+}
+function saveQualityRules(rules) {
+  try { localStorage.setItem(QUALITY_RULES_KEY, JSON.stringify(rules)); } catch { /* noop */ }
+}
+
+function validateQualityRule(rule, rows) {
+  const vals = rows.map((r) => r[rule.column]);
+  const n = vals.length;
+  if (rule.type === "notnull") {
+    const nonNull = vals.filter((v) => v !== null && v !== undefined && String(v).trim() !== "");
+    const pct = n ? (nonNull.length / n) * 100 : 0;
+    return { passed: pct >= rule.minPct, metricLabel: `${fmt(pct, 1)}% preenchido (mín. ${rule.minPct}%)`, violations: n - nonNull.length };
+  }
+  if (rule.type === "range") {
+    const violators = vals.filter((v) => isNum(v) && (v < rule.min || v > rule.max));
+    return { passed: violators.length === 0, metricLabel: `${violators.length} fora de [${rule.min}, ${rule.max}]`, violations: violators.length, examples: violators.slice(0, 5) };
+  }
+  if (rule.type === "allowed") {
+    const allowSet = new Set(String(rule.values || "").split(",").map((s) => s.trim()).filter(Boolean));
+    const violators = vals.filter((v) => v !== null && v !== undefined && !allowSet.has(String(v)));
+    return { passed: violators.length === 0, metricLabel: `${violators.length} valores não permitidos`, violations: violators.length, examples: _.uniq(violators).slice(0, 5) };
+  }
+  if (rule.type === "regex") {
+    let re; try { re = new RegExp(rule.pattern); } catch { return { passed: false, metricLabel: "Padrão regex inválido", violations: n }; }
+    const violators = vals.filter((v) => v !== null && v !== undefined && !re.test(String(v)));
+    return { passed: violators.length === 0, metricLabel: `${violators.length} não correspondem ao padrão`, violations: violators.length, examples: _.uniq(violators).slice(0, 5) };
+  }
+  if (rule.type === "unique") {
+    const nonNull = vals.filter((v) => v !== null && v !== undefined);
+    const uniqueCount = _.uniq(nonNull.map(String)).length;
+    const pct = nonNull.length ? (uniqueCount / nonNull.length) * 100 : 0;
+    return { passed: pct >= rule.minPct, metricLabel: `${fmt(pct, 1)}% únicos (mín. ${rule.minPct}%)`, violations: nonNull.length - uniqueCount };
+  }
+  return { passed: true, metricLabel: "—", violations: 0 };
+}
+
+function DataQualityTab({ rows, columns, onLogAction }) {
+  const [rules, setRules] = useState(loadQualityRules);
+  const [ruleType, setRuleType] = useState("notnull");
+  const [ruleCol, setRuleCol] = useState(columns[0]?.name || "");
+  const [params, setParams] = useState({ minPct: 95, min: 0, max: 100, values: "", pattern: "" });
+
+  useEffect(() => { saveQualityRules(rules); }, [rules]);
+
+  const addRule = () => {
+    if (!ruleCol) return;
+    const rule = { id: uid(), column: ruleCol, type: ruleType, ...params };
+    setRules((prev) => [...prev, rule]);
+  };
+  const removeRule = (id) => setRules((prev) => prev.filter((r) => r.id !== id));
+
+  const results = useMemo(() => rules.map((rule) => {
+    const colExists = columns.some((c) => c.name === rule.column);
+    if (!colExists) return { rule, colExists: false };
+    return { rule, colExists: true, ...validateQualityRule(rule, rows) };
+  }), [rules, rows, columns.map((c) => c.name).join(",")]);
+
+  const passCount = results.filter((r) => r.passed).length;
+
+  const logRules = () => {
+    const lines = rules.map((r) => {
+      if (r.type === "notnull") return `assert (df['${r.column}'].notna().mean() * 100) >= ${r.minPct}, "Falha: completude de ${r.column}"`;
+      if (r.type === "range") return `assert df['${r.column}'].between(${r.min}, ${r.max}).all(), "Falha: intervalo de ${r.column}"`;
+      if (r.type === "allowed") return `assert df['${r.column}'].isin(${JSON.stringify(String(r.values || "").split(",").map((s) => s.trim()).filter(Boolean))}).all(), "Falha: valores permitidos de ${r.column}"`;
+      if (r.type === "regex") return `assert df['${r.column}'].astype(str).str.match(r"${r.pattern}").all(), "Falha: padrão de ${r.column}"`;
+      if (r.type === "unique") return `assert (df['${r.column}'].nunique() / df['${r.column}'].count() * 100) >= ${r.minPct}, "Falha: unicidade de ${r.column}"`;
+      return "";
+    });
+    onLogAction?.({ label: `Regras de qualidade de dados (${rules.length})`, code: `# Validação de regras de qualidade (data contract leve)\n${lines.join("\n")}` });
+  };
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Data contracts" title="Regras de Qualidade"
+        right={rules.length > 0 && <div style={{ fontSize: 12.5, color: T.sub }}>{passCount}/{rules.length} regras aprovadas</div>} />
+
+      <Card style={{ padding: 20, marginBottom: 16 }}>
+        <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 12, color: T.ink }}>Nova regra</div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+          <Select value={ruleCol} onChange={setRuleCol} options={columns.map((c) => c.name)} placeholder="Coluna" />
+          <Select value={ruleType} onChange={setRuleType} options={Object.entries(RULE_TYPE_LABELS).map(([value, label]) => ({ value, label }))} />
+          {ruleType === "notnull" && (
+            <>
+              <div style={{ fontSize: 12.5, color: T.sub }}>Mín. % preenchido</div>
+              <input type="number" min={0} max={100} value={params.minPct} onChange={(e) => setParams((p) => ({ ...p, minPct: +e.target.value }))}
+                style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 90 }} />
+            </>
+          )}
+          {ruleType === "range" && (
+            <>
+              <input type="number" placeholder="Mín" value={params.min} onChange={(e) => setParams((p) => ({ ...p, min: +e.target.value }))}
+                style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 100 }} />
+              <input type="number" placeholder="Máx" value={params.max} onChange={(e) => setParams((p) => ({ ...p, max: +e.target.value }))}
+                style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 100 }} />
+            </>
+          )}
+          {ruleType === "allowed" && (
+            <input placeholder="valores separados por vírgula" value={params.values} onChange={(e) => setParams((p) => ({ ...p, values: e.target.value }))}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, minWidth: 240 }} />
+          )}
+          {ruleType === "regex" && (
+            <input placeholder="expressão regular" value={params.pattern} onChange={(e) => setParams((p) => ({ ...p, pattern: e.target.value }))}
+              style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, minWidth: 200, fontFamily: "'JetBrains Mono', monospace" }} />
+          )}
+          {ruleType === "unique" && (
+            <>
+              <div style={{ fontSize: 12.5, color: T.sub }}>Mín. % únicos</div>
+              <input type="number" min={0} max={100} value={params.minPct} onChange={(e) => setParams((p) => ({ ...p, minPct: +e.target.value }))}
+                style={{ padding: "9px 11px", borderRadius: 8, border: `1px solid ${T.border}`, fontSize: 13, width: 90 }} />
+            </>
+          )}
+          <Btn icon={Plus} onClick={addRule}>Adicionar regra</Btn>
+        </div>
+        <div style={{ fontSize: 11.5, color: T.faint, marginTop: 10 }}>
+          <Info size={12} style={{ verticalAlign: -1 }} /> As regras ficam salvas neste navegador e são revalidadas automaticamente ao trocar de base.
+        </div>
+      </Card>
+
+      {!results.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhuma regra cadastrada ainda.</div>}
+
+      {results.length > 0 && (
+        <>
+          <Card style={{ padding: 20, marginBottom: 16, overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12.5 }}>
+              <thead>
+                <tr style={{ borderBottom: `1px solid ${T.border}`, textAlign: "left" }}>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>Status</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>Coluna</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>Regra</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }}>Resultado</th>
+                  <th style={{ padding: "8px 10px", color: T.sub }} />
+                </tr>
+              </thead>
+              <tbody>
+                {results.map(({ rule, colExists, passed, metricLabel }) => (
+                  <tr key={rule.id} style={{ borderBottom: `1px solid ${T.border}` }}>
+                    <td style={{ padding: "8px 10px" }}>
+                      {!colExists ? <Pill tone="neutral">N/D</Pill> : passed ? <CheckCircle2 size={16} color={T.green} /> : <XCircle size={16} color={T.red} />}
+                    </td>
+                    <td style={{ padding: "8px 10px", fontWeight: 700, color: T.ink, fontFamily: "'JetBrains Mono', monospace" }}>{rule.column}</td>
+                    <td style={{ padding: "8px 10px", color: T.sub }}>{RULE_TYPE_LABELS[rule.type]}</td>
+                    <td style={{ padding: "8px 10px", color: T.ink }}>{colExists ? metricLabel : "Coluna ausente na base atual"}</td>
+                    <td style={{ padding: "8px 10px" }}>
+                      <button onClick={() => removeRule(rule.id)} style={{ border: "none", background: "transparent", cursor: "pointer", color: T.red }}><Trash2 size={14} /></button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </Card>
+          <Btn variant="ghost" icon={FileCode} onClick={logRules}>Adicionar validações ao script Python</Btn>
+        </>
+      )}
+    </div>
+  );
+}
 
 /* =========================================================================
    PROJECTS TAB  (persisted via window.storage — personal, not shared)
@@ -2811,6 +4047,43 @@ function buildMarkdownReport({ fileName, d, columns, stats }) {
   if (d.outlierTotal > 0) actions.push("Investigar outliers identificados — podem ser erros de coleta ou eventos legítimos raros.");
   if (!actions.length) actions.push("Base de dados em boas condições — nenhuma ação de limpeza crítica identificada.");
   actions.forEach((a) => lines.push(`- ${a}`));
+  return lines.join("\n");
+}
+
+// Gera um script Python/pandas reproduzível a partir das ações registradas
+// (testes de hipótese, features criadas, comparações de grupo, regras de qualidade).
+function buildPythonScript({ fileName, columns, pipelineLog }) {
+  const lines = [];
+  lines.push(`"""`);
+  lines.push(`Script gerado automaticamente pelo AnálisePro — reproduz a análise feita na interface.`);
+  lines.push(`Base: ${fileName}`);
+  lines.push(`Gerado em ${new Date().toLocaleString("pt-BR")}`);
+  lines.push(`"""`);
+  lines.push(`import pandas as pd`);
+  lines.push(`import numpy as np`);
+  lines.push(`from scipy import stats`);
+  lines.push(``);
+  lines.push(`# Ajuste o caminho/separador conforme o arquivo original`);
+  lines.push(`df = pd.read_csv("${fileName || "dados.csv"}", sep=None, engine="python")`);
+  lines.push(``);
+  lines.push(`# Tipos inferidos pelo AnálisePro (ajuste se necessário)`);
+  columns.filter((c) => !c.derived).forEach((c) => {
+    if (c.type === "numeric") lines.push(`df['${c.name}'] = pd.to_numeric(df['${c.name}'], errors='coerce')`);
+    else if (c.type === "date") lines.push(`df['${c.name}'] = pd.to_datetime(df['${c.name}'], errors='coerce')`);
+  });
+  lines.push(``);
+  lines.push(`print(df.describe(include='all'))`);
+  if (!pipelineLog?.length) {
+    lines.push(``);
+    lines.push(`# Nenhuma ação adicional registrada ainda — use os botões "Adicionar ao script Python"`);
+    lines.push(`# nas abas de Testes Estatísticos, Engenharia de Features, Comparação de Grupos e Regras de Qualidade.`);
+  } else {
+    pipelineLog.forEach((entry, i) => {
+      lines.push(``);
+      lines.push(`# ---- ${i + 1}. ${entry.label} ----`);
+      lines.push(entry.code);
+    });
+  }
   return lines.join("\n");
 }
 
@@ -2976,7 +4249,7 @@ td{border:1px solid #E3E6EB;padding:6px 10px;} .muted{color:#9AA1AE;font-size:13
    REPORTS TAB — BI-grade visual redesign (Power BI / Tableau style)
    Calculations, stats and test logic are 100% unchanged from before.
    ========================================================================= */
-function ReportsTab({ rows, columns, fileName }) {
+function ReportsTab({ rows, columns, fileName, pipelineLog, notes }) {
   const [theme, setTheme] = useState("light");
   const C = theme === "dark" ? REPORT_DARK : T;
   const d = useMemo(() => computeDashboard(rows, columns), [rows, columns]);
@@ -2988,6 +4261,7 @@ function ReportsTab({ rows, columns, fileName }) {
   }), [rows, numericCols.map((c) => c.name).join(",")]);
 
   const markdown = useMemo(() => buildMarkdownReport({ fileName, d, columns, stats }), [fileName, d, columns, stats]);
+  const pythonScript = useMemo(() => buildPythonScript({ fileName, columns, pipelineLog }), [fileName, columns, pipelineLog]);
 
   const insightToneMap = { amber: "warning", green: "success", teal: "info", neutral: "info", red: "warning" };
   const relevantCorrelations = d.topCorrelations.filter((p) => Math.abs(p.r) > 0.5);
@@ -3032,6 +4306,7 @@ function ReportsTab({ rows, columns, fileName }) {
           <Btn variant="ghost" icon={Download} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => downloadBlob(markdown, "relatorio_analise.md", "text/markdown")}>Markdown</Btn>
           <Btn variant="ghost" icon={FileSpreadsheet} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => exportExcelReport({ fileName, d, columns, stats })}>Excel</Btn>
           <Btn variant="ghost" icon={FileCode} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => downloadBlob(buildHtmlReport(markdown, fileName), "relatorio_analise.html", "text/html")}>HTML</Btn>
+          <Btn variant="ghost" icon={FileCode} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => downloadBlob(pythonScript, "analise_reproduzivel.py", "text/x-python")}>Python</Btn>
           <Btn icon={Printer} onClick={() => window.print()}>PDF</Btn>
         </div>
       </div>
@@ -3144,6 +4419,40 @@ function ReportsTab({ rows, columns, fileName }) {
         </div>
       </div>
 
+      {pipelineLog?.length > 0 && (
+        <>
+          <ReportDivider C={C} label="Código Python reprodutível" />
+          <div className="rpt-fade no-print" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, marginBottom: 8 }}>
+            <div style={{ fontSize: 12.5, color: C.sub, marginBottom: 12 }}>
+              {pipelineLog.length} ação(ões) registrada(s) nas abas de Testes Estatísticos, Engenharia de Features, Comparação de Grupos e Regras de Qualidade. Baixe o script completo pelo botão "Python" no topo da página.
+            </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {pipelineLog.map((entry, i) => (
+                <div key={entry.id || i} style={{ fontSize: 12, fontFamily: "'JetBrains Mono', monospace", color: C.ink, background: C.bg, padding: "6px 10px", borderRadius: 6 }}>
+                  {i + 1}. {entry.label}
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
+      {notes?.length > 0 && (
+        <>
+          <ReportDivider C={C} label="Notas de análise" />
+          <div className="rpt-fade" style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20, marginBottom: 8 }}>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {notes.map((n) => (
+                <div key={n.id} style={{ fontSize: 12.5, color: C.ink, borderLeft: `3px solid ${C.teal}`, paddingLeft: 10 }}>
+                  <b>{n.variable}</b>: {n.text}
+                  <div style={{ fontSize: 11, color: C.faint, marginTop: 2 }}>{new Date(n.createdAt).toLocaleString("pt-BR")}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        </>
+      )}
+
       <div style={{ marginTop: 18, fontSize: 11.5, color: C.faint, textAlign: "center" }}>
         Relatório gerado automaticamente pela AnálisePro · {new Date().toLocaleString("pt-BR")}
       </div>
@@ -3209,11 +4518,19 @@ const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "eda", label: "Exploração (EDA)", icon: BarChart3 },
   { id: "stats", label: "Estatística Descritiva", icon: Sigma },
+  { id: "hypothesis", label: "Testes Estatísticos", icon: Beaker },
+  { id: "features", label: "Engenharia de Features", icon: Wand2 },
+  { id: "groups", label: "Comparação de Grupos", icon: Table2 },
+  { id: "quality", label: "Regras de Qualidade", icon: ListChecks },
   { id: "ydata", label: "ydata-profiling", icon: FileBarChart2 },
   { id: "sweetviz", label: "Sweetviz", icon: GitCompare },
   { id: "projects", label: "Projetos", icon: FolderKanban },
   { id: "reports", label: "Relatórios", icon: FileText },
 ];
+
+const NOTES_KEY = "analisepro_notes_v1";
+function loadNotes() { try { return JSON.parse(localStorage.getItem(NOTES_KEY) || "[]"); } catch { return []; } }
+function saveNotes(notes) { try { localStorage.setItem(NOTES_KEY, JSON.stringify(notes)); } catch { /* noop */ } }
 
 function AnalisePro() {
   const [columns, setColumns] = useState([]);
@@ -3223,6 +4540,18 @@ function AnalisePro() {
 
   const [backendSessionId, setBackendSessionId] = useState(null);
   const [backendStatus, setBackendStatus] = useState("idle"); // idle | uploading | ready | error
+
+  const [pipelineLog, setPipelineLog] = useState([]);
+  const logAction = useCallback((entry) => {
+    setPipelineLog((prev) => [...prev, { id: uid(), at: new Date().toISOString(), ...entry }]);
+  }, []);
+
+  const [notes, setNotes] = useState(loadNotes);
+  useEffect(() => { saveNotes(notes); }, [notes]);
+  const addNote = useCallback((variable, text) => {
+    setNotes((prev) => [...prev, { id: uid(), variable, text, createdAt: new Date().toISOString() }]);
+  }, []);
+  const removeNote = useCallback((id) => setNotes((prev) => prev.filter((n) => n.id !== id)), []);
 
   const handleLoaded = useCallback((data, name, file) => {
     const cols = inferColumns(data);
@@ -3314,12 +4643,16 @@ function AnalisePro() {
           <ProjectsTab rows={[]} columns={[]} fileName="" onOpenProject={handleOpenProject} />
         )}
         {hasData && activeTab === "dashboard" && <DashboardTab rows={rows} columns={columns} fileName={fileName} />}
-        {hasData && activeTab === "eda" && <EDATab rows={rows} columns={columns} />}
+        {hasData && activeTab === "eda" && <EDATab rows={rows} columns={columns} notes={notes} onAddNote={addNote} onRemoveNote={removeNote} />}
         {hasData && activeTab === "stats" && <DescriptiveTab rows={rows} columns={columns} />}
+        {hasData && activeTab === "hypothesis" && <HypothesisTestsTab rows={rows} columns={columns} onLogAction={logAction} />}
+        {hasData && activeTab === "features" && <FeatureEngineeringTab rows={rows} columns={columns} setRows={setRows} setColumns={setColumns} onLogAction={logAction} />}
+        {hasData && activeTab === "groups" && <GroupComparisonTab rows={rows} columns={columns} onLogAction={logAction} />}
+        {hasData && activeTab === "quality" && <DataQualityTab rows={rows} columns={columns} onLogAction={logAction} />}
         {hasData && activeTab === "ydata" && <YdataProfilingTab sessionId={backendSessionId} backendStatus={backendStatus} />}
         {hasData && activeTab === "sweetviz" && <SweetvizTab sessionId={backendSessionId} backendStatus={backendStatus} />}
         {hasData && activeTab === "projects" && <ProjectsTab rows={rows} columns={columns} fileName={fileName} onOpenProject={handleOpenProject} />}
-        {hasData && activeTab === "reports" && <ReportsTab rows={rows} columns={columns} fileName={fileName} />}
+        {hasData && activeTab === "reports" && <ReportsTab rows={rows} columns={columns} fileName={fileName} pipelineLog={pipelineLog} notes={notes} />}
       </div>
     </div>
   );
