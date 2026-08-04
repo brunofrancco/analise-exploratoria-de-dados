@@ -1,0 +1,7 @@
+# Dependências do serviço dedicado ao D-Tale (backend/dtale_service.py).
+# Serviço separado do backend principal — ver comentário no topo de
+# dtale_service.py para o motivo.
+flask
+dtale>=3.10
+pandas>=2.0
+gunicorn>=21.2

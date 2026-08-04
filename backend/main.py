@@ -234,12 +234,20 @@ def autoviz_report(session_id: str):
     try:
         from autoviz.AutoViz_Class import AutoViz_Class
 
+        # AutoViz é mais confiável quando recebe um arquivo real em disco do
+        # que quando recebe apenas um DataFrame via `dfte` com filename="" —
+        # essa combinação dispara, em algumas versões, o erro "Filename is an
+        # empty string or file not able to be loaded" mesmo com o DataFrame
+        # presente. Gravar um CSV temporário evita esse caminho de código.
+        csv_path = os.path.join(tmp_dir, "dataset.csv")
+        df.to_csv(csv_path, index=False)
+
         av = AutoViz_Class()
         av.AutoViz(
-            filename="",
+            filename=csv_path,
             sep=",",
             depVar="",
-            dfte=df,
+            dfte=None,
             header=0,
             verbose=0,
             lowess=False,
@@ -287,35 +295,37 @@ def lux_report(session_id: str):
 
 # ---------------------------------------------------------------------------
 # D-Tale — exploração interativa dos dados
-# Embutido via ponte WSGI->ASGI (a2wsgi) no mesmo processo/porta do FastAPI,
-# já que serviços como o Render expõem apenas uma porta pública.
+#
+# O bundle JS do D-Tale faz suas chamadas de API a partir da raiz do domínio
+# (ex.: /dtale/data/1), então embuti-lo sob um subcaminho (ex.: /dtale-app)
+# dentro do FastAPI — mesmo via ponte WSGI->ASGI — resulta em 404s dessas
+# chamadas e a tela fica em branco. A solução é rodar o D-Tale como um
+# serviço próprio, na raiz do seu domínio (ver backend/dtale_service.py),
+# publicado separadamente no Render. Este endpoint apenas repassa o
+# DataFrame da sessão para esse serviço e devolve a URL pronta.
 # ---------------------------------------------------------------------------
-_dtale_mounted = False
-
-
-def _ensure_dtale_mounted():
-    global _dtale_mounted
-    if _dtale_mounted:
-        return
-    import dtale.app as dtale_app
-    from a2wsgi import WSGIMiddleware
-
-    flask_app = dtale_app.build_app(reaper_on=False)
-    app.mount("/dtale-app", WSGIMiddleware(flask_app))
-    _dtale_mounted = True
+DTALE_SERVICE_URL = os.environ.get("DTALE_SERVICE_URL", "").rstrip("/")
 
 
 @app.get("/api/dtale/{session_id}")
 def dtale_report(session_id: str):
     df = _get_df(session_id)
+    if not DTALE_SERVICE_URL:
+        raise HTTPException(
+            status_code=503,
+            detail="Serviço do D-Tale não configurado (variável de ambiente DTALE_SERVICE_URL ausente).",
+        )
     try:
-        _ensure_dtale_mounted()
-        from dtale.views import startup
+        import requests
 
-        instance = startup(data=df, ignore_duplicate=True)
-        data_id = getattr(instance, "_data_id", None) or getattr(instance, "data_id", None)
-        url = f"{PUBLIC_BASE_URL}/dtale-app/dtale/main/{data_id}"
-        return JSONResponse({"url": url})
+        payload = {
+            "columns": [str(c) for c in df.columns],
+            "rows": df.astype(object).where(pd.notnull(df), None).values.tolist(),
+        }
+        resp = requests.post(f"{DTALE_SERVICE_URL}/load-session", json=payload, timeout=60)
+        resp.raise_for_status()
+        path = resp.json()["path"]
+        return JSONResponse({"url": f"{DTALE_SERVICE_URL}{path}"})
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"Falha ao iniciar o D-Tale: {exc}") from exc
 

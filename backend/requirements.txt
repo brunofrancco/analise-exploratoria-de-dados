@@ -6,16 +6,16 @@ numpy>=1.26
 openpyxl>=3.1
 pyarrow>=15.0
 matplotlib>=3.8
+requests>=2.31
 
 # bibliotecas de análise automática
 ydata-profiling>=4.6
 sweetviz>=2.3
 autoviz>=0.1.905
-dtale>=3.10
 lux-api>=0.5
 skimpy>=0.0.15
 missingno>=0.5.2
 rich>=13.7
 
-# ponte WSGI (Flask) -> ASGI (FastAPI), usada para embutir o D-Tale
-a2wsgi>=1.10
+# Observação: o D-Tale roda em um serviço próprio (ver requirements-dtale.txt
+# e dtale_service.py), por isso não está listado aqui.
