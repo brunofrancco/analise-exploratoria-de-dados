@@ -7,24 +7,6 @@ services:
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
     envVars:
-      - key: PUBLIC_BASE_URL
-        value: https://analise-exploratoria-backend.onrender.com
-      - key: DTALE_SERVICE_URL
-        value: https://analise-exploratoria-dtale.onrender.com
-      - key: PYTHON_VERSION
-        value: 3.11.9
-    healthCheckPath: /health
-
-  # Serviço próprio para o D-Tale — precisa rodar na raiz do seu domínio
-  # (sem subcaminho), veja o comentário em backend/dtale_service.py.
-  - type: web
-    name: analise-exploratoria-dtale
-    runtime: python
-    rootDir: backend
-    plan: free
-    buildCommand: pip install -r requirements-dtale.txt
-    startCommand: gunicorn -w 1 -b 0.0.0.0:$PORT dtale_service:app
-    envVars:
       - key: PYTHON_VERSION
         value: 3.11.9
     healthCheckPath: /health
