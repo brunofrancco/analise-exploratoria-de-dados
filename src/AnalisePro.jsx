@@ -17,13 +17,13 @@ import {
   RefreshCw, Share2, Filter, Calendar, ShieldCheck, ShieldAlert, TrendingDown,
   ArrowUpRight, ArrowDownRight, Zap, Target, Rocket, Flame, Radar as RadarIcon,
   Maximize2, Compass,
-  FileBarChart2, GitCompare, Wand2, Table2, ListChecks, Grid2x2, ExternalLink,
+  FileBarChart2, GitCompare, ExternalLink,
 } from "lucide-react";
 
 /* =========================================================================
    BACKEND API (Python) — usado pelas abas de bibliotecas de análise
-   automática (ydata-profiling, Sweetviz, AutoViz, D-Tale, Lux, skimpy,
-   missingno). Ajuste esta URL após o deploy do serviço no Render.
+   automática (ydata-profiling, Sweetviz). Ajuste esta URL após o deploy do
+   serviço no Render.
    ========================================================================= */
 const API_BASE = "https://analise-exploratoria-backend.onrender.com";
 
@@ -630,7 +630,7 @@ function UploadView({ onLoaded }) {
         {[
           { icon: Gauge, t: "Diagnóstico automático", d: "Tipos de variável, ausentes, duplicados e outliers em segundos." },
           { icon: BarChart3, t: "EDA instantânea", d: "Histogramas, boxplots, dispersão e correlação sem configurar nada." },
-          { icon: FlaskConical, t: "Relatórios automáticos", d: "ydata-profiling, Sweetviz, AutoViz e outras bibliotecas geradas a partir da mesma base." },
+          { icon: FlaskConical, t: "Relatórios automáticos", d: "ydata-profiling e Sweetviz gerados a partir da mesma base." },
         ].map((f, i) => (
           <Card key={i} style={{ padding: 16 }}>
             <f.icon size={18} color={T.teal} />
@@ -3175,22 +3175,6 @@ function LibraryStatusNotice({ backendStatus }) {
   return null;
 }
 
-// Usa fetch para buscar JSON do backend para um dado endpoint + sessão.
-function useBackendJson(endpoint, sessionId) {
-  const [state, setState] = useState({ status: "idle", data: null, error: null });
-  useEffect(() => {
-    if (!sessionId) { setState({ status: "idle", data: null, error: null }); return; }
-    let cancelled = false;
-    setState({ status: "loading", data: null, error: null });
-    fetch(`${API_BASE}/api/${endpoint}/${sessionId}`)
-      .then((res) => { if (!res.ok) throw new Error(`O servidor respondeu com erro ${res.status}.`); return res.json(); })
-      .then((data) => { if (!cancelled) setState({ status: "ready", data, error: null }); })
-      .catch((err) => { if (!cancelled) setState({ status: "error", data: null, error: err.message }); });
-    return () => { cancelled = true; };
-  }, [endpoint, sessionId]);
-  return state;
-}
-
 // Abas cujo backend devolve HTML pronto (o navegador carrega direto via <iframe src>).
 function IframeReportTab({ eyebrow, title, subtitle, endpoint, sessionId, backendStatus }) {
   const [loaded, setLoaded] = useState(false);
@@ -3218,101 +3202,6 @@ function YdataProfilingTab({ sessionId, backendStatus }) {
 function SweetvizTab({ sessionId, backendStatus }) {
   return <IframeReportTab eyebrow="Sweetviz" title="Relatório visual e comparação de variáveis" subtitle="Visão visual das variáveis da base, com histogramas, associações e comparação entre colunas." endpoint="sweetviz" sessionId={sessionId} backendStatus={backendStatus} />;
 }
-function SkimpyTab({ sessionId, backendStatus }) {
-  return <IframeReportTab eyebrow="skimpy" title="Resumo estatístico do DataFrame" subtitle="Resumo compacto por coluna: tipo, ausentes, média, desvio padrão e distribuição." endpoint="skimpy" sessionId={sessionId} backendStatus={backendStatus} />;
-}
-
-function AutoVizTab({ sessionId, backendStatus }) {
-  const { status, data, error } = useBackendJson("autoviz", sessionId);
-  return (
-    <div>
-      <SectionTitle eyebrow="AutoViz" title="Geração automática de gráficos" />
-      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
-      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Gerando gráficos automaticamente com AutoViz…</Card>}
-      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar os gráficos: {error}</div>}
-      {sessionId && status === "ready" && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
-          {(data.images || []).map((src, i) => (
-            <Card key={i} style={{ padding: 12 }}><img src={src} alt={`AutoViz ${i + 1}`} style={{ width: "100%", borderRadius: 8 }} /></Card>
-          ))}
-          {!data.images?.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhum gráfico gerado para esta base.</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function MissingnoTab({ sessionId, backendStatus }) {
-  const { status, data, error } = useBackendJson("missingno", sessionId);
-  const charts = [
-    { key: "matrix", label: "Matriz de ausentes" },
-    { key: "bar", label: "Barras — completude por coluna" },
-    { key: "heatmap", label: "Correlação de ausência entre colunas" },
-  ];
-  return (
-    <div>
-      <SectionTitle eyebrow="missingno" title="Análise e visualização de valores ausentes" />
-      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
-      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Gerando visualizações de dados ausentes…</Card>}
-      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar as visualizações: {error}</div>}
-      {sessionId && status === "ready" && (
-        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-          {charts.map((c) => data[c.key] && (
-            <Card key={c.key} style={{ padding: 16 }}>
-              <div style={{ fontWeight: 700, fontSize: 13.5, color: T.ink, marginBottom: 10 }}>{c.label}</div>
-              <img src={data[c.key]} alt={c.label} style={{ width: "100%", borderRadius: 8 }} />
-            </Card>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function LuxTab({ sessionId, backendStatus }) {
-  const { status, data, error } = useBackendJson("lux", sessionId);
-  return (
-    <div>
-      <SectionTitle eyebrow="Lux" title="Sugestão automática de visualizações" />
-      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
-      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Calculando recomendações de visualização com Lux…</Card>}
-      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar recomendações: {error}</div>}
-      {sessionId && status === "ready" && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
-          {(data.recommendations || []).map((rec, i) => (
-            <Card key={i} style={{ padding: 14 }}>
-              <div style={{ fontWeight: 700, fontSize: 13, color: T.ink, marginBottom: 8 }}>{rec.name}</div>
-              {rec.image ? <img src={rec.image} alt={rec.name} style={{ width: "100%", borderRadius: 8 }} /> : (
-                <div style={{ fontSize: 12.5, color: T.sub }}>{rec.description}</div>
-              )}
-            </Card>
-          ))}
-          {!data.recommendations?.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhuma recomendação disponível para esta base.</div>}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function DTaleTab({ sessionId, backendStatus }) {
-  const { status, data, error } = useBackendJson("dtale", sessionId);
-  return (
-    <div>
-      <SectionTitle eyebrow="D-Tale" title="Exploração interativa dos dados" right={status === "ready" && data?.url && (
-        <Btn variant="ghost" icon={ExternalLink} onClick={() => window.open(data.url, "_blank")}>Abrir em nova aba</Btn>
-      )} />
-      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
-      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Iniciando sessão interativa do D-Tale…</Card>}
-      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao iniciar o D-Tale: {error}</div>}
-      {sessionId && status === "ready" && data?.url && (
-        <Card style={{ padding: 0, overflow: "hidden" }}>
-          <iframe title="D-Tale" src={data.url} style={{ width: "100%", height: 720, border: "none" }} />
-        </Card>
-      )}
-    </div>
-  );
-}
-
 /* =========================================================================
    MAIN APP
    ========================================================================= */
@@ -3322,11 +3211,6 @@ const NAV = [
   { id: "stats", label: "Estatística Descritiva", icon: Sigma },
   { id: "ydata", label: "ydata-profiling", icon: FileBarChart2 },
   { id: "sweetviz", label: "Sweetviz", icon: GitCompare },
-  { id: "autoviz", label: "AutoViz", icon: Wand2 },
-  { id: "dtale", label: "D-Tale", icon: Table2 },
-  { id: "lux", label: "Lux", icon: Lightbulb },
-  { id: "skimpy", label: "skimpy", icon: ListChecks },
-  { id: "missingno", label: "missingno", icon: Grid2x2 },
   { id: "projects", label: "Projetos", icon: FolderKanban },
   { id: "reports", label: "Relatórios", icon: FileText },
 ];
@@ -3347,10 +3231,9 @@ function AnalisePro() {
     setActiveTab("dashboard");
 
     // Envia o arquivo original ao backend Python para alimentar as abas de
-    // bibliotecas (ydata-profiling, Sweetviz, AutoViz, D-Tale, Lux, skimpy,
-    // missingno). Isso é independente da análise client-side acima — se o
-    // backend falhar ou estiver indisponível, o restante do app continua
-    // funcionando normalmente.
+    // bibliotecas (ydata-profiling, Sweetviz). Isso é independente da
+    // análise client-side acima — se o backend falhar ou estiver
+    // indisponível, o restante do app continua funcionando normalmente.
     setBackendSessionId(null);
     if (file) {
       setBackendStatus("uploading");
@@ -3435,11 +3318,6 @@ function AnalisePro() {
         {hasData && activeTab === "stats" && <DescriptiveTab rows={rows} columns={columns} />}
         {hasData && activeTab === "ydata" && <YdataProfilingTab sessionId={backendSessionId} backendStatus={backendStatus} />}
         {hasData && activeTab === "sweetviz" && <SweetvizTab sessionId={backendSessionId} backendStatus={backendStatus} />}
-        {hasData && activeTab === "autoviz" && <AutoVizTab sessionId={backendSessionId} backendStatus={backendStatus} />}
-        {hasData && activeTab === "dtale" && <DTaleTab sessionId={backendSessionId} backendStatus={backendStatus} />}
-        {hasData && activeTab === "lux" && <LuxTab sessionId={backendSessionId} backendStatus={backendStatus} />}
-        {hasData && activeTab === "skimpy" && <SkimpyTab sessionId={backendSessionId} backendStatus={backendStatus} />}
-        {hasData && activeTab === "missingno" && <MissingnoTab sessionId={backendSessionId} backendStatus={backendStatus} />}
         {hasData && activeTab === "projects" && <ProjectsTab rows={rows} columns={columns} fileName={fileName} onOpenProject={handleOpenProject} />}
         {hasData && activeTab === "reports" && <ReportsTab rows={rows} columns={columns} fileName={fileName} />}
       </div>
