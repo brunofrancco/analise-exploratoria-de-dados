@@ -17,7 +17,15 @@ import {
   RefreshCw, Share2, Filter, Calendar, ShieldCheck, ShieldAlert, TrendingDown,
   ArrowUpRight, ArrowDownRight, Zap, Target, Rocket, Flame, Radar as RadarIcon,
   Maximize2, Compass,
+  FileBarChart2, GitCompare, Wand2, Table2, ListChecks, Grid2x2, ExternalLink,
 } from "lucide-react";
+
+/* =========================================================================
+   BACKEND API (Python) — usado pelas abas de bibliotecas de análise
+   automática (ydata-profiling, Sweetviz, AutoViz, D-Tale, Lux, skimpy,
+   missingno). Ajuste esta URL após o deploy do serviço no Render.
+   ========================================================================= */
+const API_BASE = "https://analise-exploratoria-backend.onrender.com";
 
 /* =========================================================================
    DESIGN TOKENS
@@ -195,124 +203,7 @@ function betai(a, b, x) {
   if (x < (a + 1) / (a + b + 2)) return (bt * betacf(x, a, b)) / a;
   return 1 - (bt * betacf(1 - x, b, a)) / b;
 }
-function gammap(a, x) {
-  if (x < 0 || a <= 0) return 0;
-  if (x < a + 1) {
-    let ap = a, sum = 1 / a, del = sum;
-    for (let n = 0; n < 200; n++) {
-      ap += 1; del *= x / ap; sum += del;
-      if (Math.abs(del) < Math.abs(sum) * 3e-7) break;
-    }
-    return sum * Math.exp(-x + a * Math.log(x) - gammaln(a));
-  }
-  let b = x + 1 - a, c = 1e30, d = 1 / b, h = d;
-  for (let i = 1; i <= 200; i++) {
-    const an = -i * (i - a);
-    b += 2; d = an * d + b; if (Math.abs(d) < 1e-30) d = 1e-30;
-    c = b + an / c; if (Math.abs(c) < 1e-30) c = 1e-30;
-    d = 1 / d; const del = d * c; h *= del;
-    if (Math.abs(del - 1) < 3e-7) break;
-  }
-  const Q = Math.exp(-x + a * Math.log(x) - gammaln(a)) * h;
-  return 1 - Q;
-}
-function erf(x) {
-  const sign = x < 0 ? -1 : 1; x = Math.abs(x);
-  const a1 = 0.254829592, a2 = -0.284496736, a3 = 1.421413741, a4 = -1.453152027, a5 = 1.061405429, p = 0.3275911;
-  const t = 1 / (1 + p * x);
-  const y = 1 - (((((a5 * t + a4) * t) + a3) * t + a2) * t + a1) * t * Math.exp(-x * x);
-  return sign * y;
-}
-function normalCDF(z) { return 0.5 * (1 + erf(z / Math.SQRT2)); }
 function tTwoTailP(t, df) { return betai(df / 2, 0.5, df / (df + t * t)); }
-function chiSqP(chi2, df) { return 1 - gammap(df / 2, chi2 / 2); }
-function fUpperP(f, d1, d2) { if (f <= 0) return 1; return 1 - betai(d1 / 2, d2 / 2, (d1 * f) / (d1 * f + d2)); }
-
-/* --- hypothesis tests --- */
-function oneSampleTTest(data, mu0) {
-  const n = data.length, m = mean(data), s = std(data, true);
-  const se = s / Math.sqrt(n);
-  const t = (m - mu0) / se;
-  const df = n - 1;
-  const p = tTwoTailP(t, df);
-  return { name: "Teste t de uma amostra", statistic: t, statLabel: "t", df, p, n, extra: { mean: m, se } };
-}
-function twoSampleTTest(a, b, equalVar = false) {
-  const n1 = a.length, n2 = b.length;
-  const m1 = mean(a), m2 = mean(b), v1 = variance(a, true), v2 = variance(b, true);
-  let t, df;
-  if (equalVar) {
-    const sp2 = ((n1 - 1) * v1 + (n2 - 1) * v2) / (n1 + n2 - 2);
-    const se = Math.sqrt(sp2 * (1 / n1 + 1 / n2));
-    t = (m1 - m2) / se; df = n1 + n2 - 2;
-  } else {
-    const se = Math.sqrt(v1 / n1 + v2 / n2);
-    t = (m1 - m2) / se;
-    df = (v1 / n1 + v2 / n2) ** 2 / (((v1 / n1) ** 2) / (n1 - 1) + ((v2 / n2) ** 2) / (n2 - 1));
-  }
-  const p = tTwoTailP(t, df);
-  return { name: equalVar ? "Teste t independente (var. iguais)" : "Teste t independente (Welch)", statistic: t, statLabel: "t", df, p, extra: { mean1: m1, mean2: m2, n1, n2 } };
-}
-function pairedTTest(a, b) {
-  const n = Math.min(a.length, b.length);
-  const diffs = _.range(n).map((i) => a[i] - b[i]);
-  return { ...oneSampleTTest(diffs, 0), name: "Teste t pareado" };
-}
-function oneWayANOVA(groups) {
-  const all = groups.flat();
-  const grandMean = mean(all);
-  const k = groups.length, N = all.length;
-  const ssb = _.sum(groups.map((g) => g.length * (mean(g) - grandMean) ** 2));
-  const ssw = _.sum(groups.map((g) => _.sum(g.map((v) => (v - mean(g)) ** 2))));
-  const dfb = k - 1, dfw = N - k;
-  const msb = ssb / dfb, msw = ssw / dfw;
-  const f = msb / msw;
-  const p = fUpperP(f, dfb, dfw);
-  return { name: "ANOVA de um fator", statistic: f, statLabel: "F", df: `${dfb}, ${dfw}`, p, extra: { ssb, ssw, msb, msw, k, N } };
-}
-function chiSquareIndependence(catA, catB) {
-  const levelsA = _.uniq(catA), levelsB = _.uniq(catB);
-  const table = levelsA.map(() => levelsB.map(() => 0));
-  for (let i = 0; i < catA.length; i++) {
-    const ai = levelsA.indexOf(catA[i]), bi = levelsB.indexOf(catB[i]);
-    table[ai][bi] += 1;
-  }
-  const rowTot = table.map((r) => _.sum(r));
-  const colTot = levelsB.map((_c, j) => _.sum(table.map((r) => r[j])));
-  const total = _.sum(rowTot);
-  let chi2 = 0;
-  const expected = table.map((r, i) => r.map((_v, j) => (rowTot[i] * colTot[j]) / total));
-  for (let i = 0; i < table.length; i++)
-    for (let j = 0; j < table[i].length; j++) {
-      const e = expected[i][j];
-      if (e > 0) chi2 += (table[i][j] - e) ** 2 / e;
-    }
-  const df = (levelsA.length - 1) * (levelsB.length - 1);
-  const p = chiSqP(chi2, df);
-  return { name: "Qui-quadrado de independência", statistic: chi2, statLabel: "χ²", df, p, extra: { table, expected, levelsA, levelsB } };
-}
-function pearsonTest(x, y) {
-  const n = Math.min(x.length, y.length);
-  const r = pearson(x, y);
-  const df = n - 2;
-  const t = r * Math.sqrt(df / (1 - r * r));
-  const p = tTwoTailP(t, df);
-  return { name: "Correlação de Pearson", statistic: r, statLabel: "r", df, p, extra: { t, n } };
-}
-function mannWhitneyU(a, b) {
-  const n1 = a.length, n2 = b.length;
-  const combined = [...a.map((v) => ({ v, g: 0 })), ...b.map((v) => ({ v, g: 1 }))];
-  const ranks = rankArr(combined.map((d) => d.v));
-  const R1 = _.sum(ranks.filter((_r, i) => combined[i].g === 0));
-  const U1 = R1 - (n1 * (n1 + 1)) / 2;
-  const U2 = n1 * n2 - U1;
-  const U = Math.min(U1, U2);
-  const mu = (n1 * n2) / 2;
-  const sigma = Math.sqrt((n1 * n2 * (n1 + n2 + 1)) / 12);
-  const z = (U - mu) / sigma;
-  const p = 2 * (1 - normalCDF(Math.abs(z)));
-  return { name: "Mann-Whitney U", statistic: U, statLabel: "U", df: null, p, extra: { z, n1, n2 } };
-}
 
 /* =========================================================================
    DATA LOADING / SCHEMA INFERENCE  (robust header + type detection)
@@ -659,7 +550,7 @@ function UploadView({ onLoaded }) {
         complete: (res) => {
           if (!res.data.length) { setError("O arquivo parece vazio."); setBusy(false); return; }
           const { rows } = normalizeParsedRows(res.data);
-          onLoaded(rows, file.name);
+          onLoaded(rows, file.name, file);
           setBusy(false);
         },
         error: (err) => { setError("Falha ao ler CSV: " + err.message); setBusy(false); },
@@ -673,7 +564,7 @@ function UploadView({ onLoaded }) {
           const json = XLSX.utils.sheet_to_json(sheet, { defval: null });
           if (!json.length) { setError("A planilha parece vazia."); setBusy(false); return; }
           const { rows } = normalizeParsedRows(json);
-          onLoaded(rows, file.name);
+          onLoaded(rows, file.name, file);
         } catch (err) { setError("Falha ao ler Excel: " + err.message); }
         setBusy(false);
       };
@@ -686,7 +577,7 @@ function UploadView({ onLoaded }) {
           const arr = Array.isArray(parsed) ? parsed : parsed.data || Object.values(parsed);
           if (!Array.isArray(arr) || !arr.length) { setError("JSON precisa ser uma lista de registros."); setBusy(false); return; }
           const { rows } = normalizeParsedRows(arr);
-          onLoaded(rows, file.name);
+          onLoaded(rows, file.name, file);
         } catch (err) { setError("JSON inválido: " + err.message); }
         setBusy(false);
       };
@@ -739,7 +630,7 @@ function UploadView({ onLoaded }) {
         {[
           { icon: Gauge, t: "Diagnóstico automático", d: "Tipos de variável, ausentes, duplicados e outliers em segundos." },
           { icon: BarChart3, t: "EDA instantânea", d: "Histogramas, boxplots, dispersão e correlação sem configurar nada." },
-          { icon: FlaskConical, t: "Testes com interpretação", d: "Hipóteses, pressupostos e conclusão em linguagem simples." },
+          { icon: FlaskConical, t: "Relatórios automáticos", d: "ydata-profiling, Sweetviz, AutoViz e outras bibliotecas geradas a partir da mesma base." },
         ].map((f, i) => (
           <Card key={i} style={{ padding: 16 }}>
             <f.icon size={18} color={T.teal} />
@@ -1256,7 +1147,7 @@ function ImpactEffortMatrix({ C, items }) {
   );
 }
 
-function DashboardTab({ rows, columns, fileName, testHistory, onTestRun }) {
+function DashboardTab({ rows, columns, fileName }) {
   const [theme, setTheme] = useState("light");
   const C = theme === "dark" ? REPORT_DARK : T;
   const [subTab, setSubTab] = useState("executivo");
@@ -1306,7 +1197,6 @@ function DashboardTab({ rows, columns, fileName, testHistory, onTestRun }) {
   const alerts = useMemo(() => buildAlerts(d, columns), [d, columns]);
   const kpiSeries = useMemo(() => buildKpiSeries(filteredRows, numericCols, dateColName), [filteredRows, numericCols, dateColName]);
   const relevantCorrelations = d.allCorrPairs.filter((p) => Math.abs(p.r) > 0.5);
-  const significantTests = (testHistory || []).filter((t) => t.p < 0.05);
 
   // Descriptive-only insights for the Executivo sub-tab (same computed data, filtered for presentation)
   const descriptiveInsights = insights.filter((i) => !/correla|pareto/i.test(i.text));
@@ -1636,7 +1526,6 @@ function DashboardTab({ rows, columns, fileName, testHistory, onTestRun }) {
         <div className="dash-fade">
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 12, marginBottom: 16 }}>
             <KpiCard C={C} icon={Activity} label="Correlações relevantes" value={relevantCorrelations.length} sub="|r| > 0.5" tone={relevantCorrelations.length ? "teal" : "neutral"} />
-            <KpiCard C={C} icon={FlaskConical} label="Testes executados" value={testHistory?.length || 0} sub={`${significantTests.length} significativo(s)`} tone={significantTests.length ? "green" : "neutral"} />
             <KpiCard C={C} icon={AlertTriangle} label="Outliers (IQR)" value={d.outlierTotal} tone={d.outlierTotal > 0 ? "amber" : "green"} />
             <KpiCard C={C} icon={Info} label="Duplicados" value={d.duplicates} sub={`${fmt(d.duplicatePct, 1)}%`} tone={d.duplicates > 0 ? "amber" : "green"} />
           </div>
@@ -1722,9 +1611,6 @@ function DashboardTab({ rows, columns, fileName, testHistory, onTestRun }) {
 
           <ReportDivider C={C} label="Exploração de dados (EDA) — todas as funcionalidades existentes" />
           <EDATab rows={filteredRows} columns={columns} />
-
-          <ReportDivider C={C} label="Estatística inferencial — testes de hipótese" />
-          <TestsTab rows={filteredRows} columns={columns} onTestRun={onTestRun} />
         </div>
       )}
 
@@ -2784,239 +2670,13 @@ function DescriptiveTab({ rows, columns }) {
   );
 }
 
-/* =========================================================================
-   HYPOTHESIS TESTS TAB
-   ========================================================================= */
-const TEST_DEFS = {
-  one_sample_t: {
-    label: "Teste t de uma amostra", input: "oneNumeric",
-    h0: "A média da variável é igual ao valor de referência (μ = μ₀).",
-    h1: "A média da variável é diferente do valor de referência (μ ≠ μ₀).",
-    assumptions: ["Variável numérica contínua", "Amostra aproximadamente normal (ou n grande, pelo Teorema Central do Limite)", "Observações independentes"],
-    when: "Quando você quer comparar a média de uma variável a um valor teórico ou histórico conhecido.",
-  },
-  two_sample_t: {
-    label: "Teste t independente (2 grupos)", input: "numericPlusGroup2",
-    h0: "As médias dos dois grupos são iguais (μ₁ = μ₂).",
-    h1: "As médias dos dois grupos são diferentes (μ₁ ≠ μ₂).",
-    assumptions: ["Duas amostras independentes", "Distribuição aproximadamente normal em cada grupo", "Variâncias podem ser iguais ou diferentes (Welch é mais robusto)"],
-    when: "Quando você quer comparar a média de uma variável numérica entre exatamente 2 grupos.",
-  },
-  paired_t: {
-    label: "Teste t pareado", input: "twoNumeric",
-    h0: "A média das diferenças entre os pares é zero.",
-    h1: "A média das diferenças entre os pares é diferente de zero.",
-    assumptions: ["As duas medições vêm dos mesmos indivíduos/unidades", "As diferenças são aproximadamente normais", "Pares independentes entre si"],
-    when: "Quando você mede a mesma unidade duas vezes (antes/depois) e quer saber se houve mudança.",
-  },
-  anova: {
-    label: "ANOVA de um fator", input: "numericPlusGroupK",
-    h0: "Todas as médias dos grupos são iguais.",
-    h1: "Pelo menos uma média de grupo é diferente das demais.",
-    assumptions: ["3 ou mais grupos independentes", "Normalidade em cada grupo", "Homogeneidade de variâncias (teste de Levene)"],
-    when: "Quando você quer comparar a média de uma variável numérica entre 3 ou mais grupos.",
-  },
-  chi_square: {
-    label: "Qui-quadrado de independência", input: "twoCategorical",
-    h0: "As duas variáveis categóricas são independentes (não há associação).",
-    h1: "As duas variáveis categóricas são associadas (não são independentes).",
-    assumptions: ["Variáveis categóricas", "Frequências esperadas ≥ 5 na maioria das células", "Observações independentes"],
-    when: "Quando você quer testar se existe associação entre duas variáveis categóricas.",
-  },
-  pearson_corr: {
-    label: "Correlação de Pearson (significância)", input: "twoNumeric",
-    h0: "Não há correlação linear entre as duas variáveis (ρ = 0).",
-    h1: "Há correlação linear entre as duas variáveis (ρ ≠ 0).",
-    assumptions: ["Relação aproximadamente linear", "Ambas variáveis aproximadamente normais", "Ausência de outliers extremos"],
-    when: "Quando você quer saber se a correlação observada entre duas variáveis numéricas é estatisticamente significativa.",
-  },
-  mann_whitney: {
-    label: "Mann-Whitney U (não paramétrico)", input: "numericPlusGroup2",
-    h0: "As distribuições dos dois grupos são iguais.",
-    h1: "As distribuições dos dois grupos são diferentes.",
-    assumptions: ["Alternativa ao teste t quando a normalidade não se sustenta", "Amostras independentes", "Variável ao menos ordinal"],
-    when: "Alternativa não paramétrica ao teste t para 2 grupos, quando os dados não são normais.",
-  },
-};
-
-function TestsTab({ rows, columns, onTestRun }) {
-  const numericCols = columns.filter((c) => c.type === "numeric");
-  const catCols = columns.filter((c) => c.type === "categorical");
-  const [testId, setTestId] = useState("one_sample_t");
-  const [numA, setNumA] = useState(numericCols[0]?.name || "");
-  const [numB, setNumB] = useState(numericCols[1]?.name || "");
-  const [groupCol, setGroupCol] = useState(catCols[0]?.name || "");
-  const [mu0, setMu0] = useState("0");
-  const [result, setResult] = useState(null);
-  const [err, setErr] = useState(null);
-  const def = TEST_DEFS[testId];
-
-  const groupLevels = useMemo(() => groupCol ? _.uniq(rows.map((r) => r[groupCol]).filter((v) => v !== null)) : [], [rows, groupCol]);
-
-  const run = () => {
-    setErr(null); setResult(null);
-    try {
-      let res;
-      if (def.input === "oneNumeric") {
-        const vals = rows.map((r) => r[numA]).filter(isNum);
-        if (vals.length < 2) throw new Error("Dados insuficientes.");
-        res = oneSampleTTest(vals, parseFloat(mu0) || 0);
-      } else if (def.input === "twoNumeric") {
-        const pairs = rows.filter((r) => isNum(r[numA]) && isNum(r[numB]));
-        if (pairs.length < 3) throw new Error("Dados insuficientes.");
-        const x = pairs.map((r) => r[numA]), y = pairs.map((r) => r[numB]);
-        res = testId === "pearson_corr" ? pearsonTest(x, y) : pairedTTest(x, y);
-      } else if (def.input === "numericPlusGroup2") {
-        if (groupLevels.length !== 2) throw new Error("A coluna de grupo precisa ter exatamente 2 categorias.");
-        const a = rows.filter((r) => r[groupCol] === groupLevels[0] && isNum(r[numA])).map((r) => r[numA]);
-        const b = rows.filter((r) => r[groupCol] === groupLevels[1] && isNum(r[numA])).map((r) => r[numA]);
-        if (a.length < 2 || b.length < 2) throw new Error("Dados insuficientes em algum grupo.");
-        res = testId === "mann_whitney" ? mannWhitneyU(a, b) : twoSampleTTest(a, b, false);
-        res.extra = { ...res.extra, groupA: groupLevels[0], groupB: groupLevels[1] };
-      } else if (def.input === "numericPlusGroupK") {
-        if (groupLevels.length < 3) throw new Error("A coluna de grupo precisa ter 3 ou mais categorias.");
-        const groups = groupLevels.map((lv) => rows.filter((r) => r[groupCol] === lv && isNum(r[numA])).map((r) => r[numA]));
-        if (groups.some((g) => g.length < 2)) throw new Error("Dados insuficientes em algum grupo.");
-        res = oneWayANOVA(groups);
-      } else if (def.input === "twoCategorical") {
-        const pairs = rows.filter((r) => r[numA] !== null && r[groupCol] !== null);
-        if (pairs.length < 5) throw new Error("Dados insuficientes.");
-        res = chiSquareIndependence(pairs.map((r) => r[numA]), pairs.map((r) => r[groupCol]));
-      }
-      const enriched = { ...res, id: testId, timestamp: new Date().toISOString(), def };
-      setResult(enriched);
-      onTestRun?.(enriched);
-    } catch (e) { setErr(e.message); }
-  };
-
-  const alpha = 0.05;
-  const reject = result ? result.p < alpha : null;
-
-  return (
-    <div>
-      <SectionTitle eyebrow="Inferência" title="Testes de Hipótese" />
-      <div style={{ display: "grid", gridTemplateColumns: "340px 1fr", gap: 16 }}>
-        <Card style={{ padding: 20 }}>
-          <div style={{ fontWeight: 700, fontSize: 13.5, marginBottom: 10, color: T.ink }}>Configuração</div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            <div>
-              <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Teste</label><br />
-              <select value={testId} onChange={(e) => { setTestId(e.target.value); setResult(null); }}
-                style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}`, marginTop: 4, fontSize: 13 }}>
-                {Object.entries(TEST_DEFS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
-              </select>
-            </div>
-
-            {(def.input === "oneNumeric" || def.input === "twoNumeric" || def.input === "numericPlusGroup2" || def.input === "numericPlusGroupK") && (
-              <div>
-                <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Variável numérica {def.input === "twoNumeric" ? "A" : ""}</label><br />
-                <Select value={numA} onChange={setNumA} options={numericCols.map((c) => c.name)} />
-              </div>
-            )}
-            {def.input === "twoNumeric" && (
-              <div>
-                <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Variável numérica B</label><br />
-                <Select value={numB} onChange={setNumB} options={numericCols.map((c) => c.name)} />
-              </div>
-            )}
-            {def.input === "oneNumeric" && (
-              <div>
-                <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Valor de referência (μ₀)</label><br />
-                <input value={mu0} onChange={(e) => setMu0(e.target.value)} type="number"
-                  style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${T.border}`, marginTop: 4, fontSize: 13 }} />
-              </div>
-            )}
-            {(def.input === "numericPlusGroup2" || def.input === "numericPlusGroupK") && (
-              <div>
-                <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Coluna de grupo (categórica)</label><br />
-                <Select value={groupCol} onChange={setGroupCol} options={catCols.map((c) => c.name)} />
-                <div style={{ fontSize: 11, color: T.faint, marginTop: 4 }}>{groupLevels.length} categorias detectadas</div>
-              </div>
-            )}
-            {def.input === "twoCategorical" && (
-              <>
-                <div>
-                  <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Categórica A</label><br />
-                  <Select value={numA} onChange={setNumA} options={catCols.map((c) => c.name)} />
-                </div>
-                <div>
-                  <label style={{ fontSize: 11.5, color: T.sub, fontWeight: 600 }}>Categórica B</label><br />
-                  <Select value={groupCol} onChange={setGroupCol} options={catCols.map((c) => c.name)} />
-                </div>
-              </>
-            )}
-            <Btn onClick={run} icon={FlaskConical}>Rodar teste</Btn>
-            {err && <div style={{ color: T.red, fontSize: 12.5, background: T.redSoft, padding: 8, borderRadius: 8 }}>{err}</div>}
-          </div>
-
-          <div style={{ marginTop: 18, paddingTop: 14, borderTop: `1px solid ${T.border}` }}>
-            <div style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", marginBottom: 6 }}>Quando usar</div>
-            <div style={{ fontSize: 12.5, color: T.ink, lineHeight: 1.5 }}>{def.when}</div>
-          </div>
-        </Card>
-
-        <div>
-          {!result && (
-            <Card style={{ padding: 30, textAlign: "center", color: T.sub, fontSize: 13.5 }}>
-              Configure as variáveis e clique em <b>Rodar teste</b> para ver estatística, p-valor e interpretação.
-            </Card>
-          )}
-          {result && (
-            <Card style={{ padding: 22 }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
-                <div>
-                  <div style={{ fontFamily: "'Space Grotesk', sans-serif", fontWeight: 700, fontSize: 18, color: T.ink }}>{result.name}</div>
-                  <div style={{ fontSize: 12, color: T.faint, marginTop: 2 }}>α = 0.05</div>
-                </div>
-                <Pill tone={reject ? "green" : "amber"}>{reject ? "H₀ rejeitada" : "H₀ não rejeitada"}</Pill>
-              </div>
-
-              <div style={{ display: "flex", gap: 10, marginTop: 16, flexWrap: "wrap" }}>
-                <StatTile label={result.statLabel} value={fmt(result.statistic, 3)} />
-                {result.df !== null && result.df !== undefined && <StatTile label="Graus de liberdade" value={typeof result.df === "number" ? fmt(result.df, 1) : result.df} />}
-                <StatTile label="p-valor" value={fmtP(result.p)} tone={reject ? "green" : "amber"} />
-              </div>
-
-              <div style={{ marginTop: 18, display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-                <div>
-                  <div style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", marginBottom: 6 }}>Hipótese nula (H₀)</div>
-                  <div style={{ fontSize: 13, color: T.ink, lineHeight: 1.5 }}>{def.h0}</div>
-                </div>
-                <div>
-                  <div style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", marginBottom: 6 }}>Hipótese alternativa (H₁)</div>
-                  <div style={{ fontSize: 13, color: T.ink, lineHeight: 1.5 }}>{def.h1}</div>
-                </div>
-              </div>
-
-              <div style={{ marginTop: 18 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 700, color: T.sub, textTransform: "uppercase", marginBottom: 6 }}>Pressupostos</div>
-                <ul style={{ margin: 0, paddingLeft: 18, fontSize: 12.5, color: T.ink, lineHeight: 1.7 }}>
-                  {def.assumptions.map((a, i) => <li key={i}>{a}</li>)}
-                </ul>
-              </div>
-
-              <div style={{ marginTop: 18, background: T.tealSoft, borderRadius: 10, padding: 14 }}>
-                <div style={{ fontSize: 11.5, fontWeight: 700, color: T.tealDark, textTransform: "uppercase", marginBottom: 6 }}>Interpretação e conclusão</div>
-                <div style={{ fontSize: 13, color: T.ink, lineHeight: 1.6 }}>
-                  {reject
-                    ? `Com p = ${fmtP(result.p)} (< 0.05), há evidência estatística para rejeitar H₀. ${def.h1}`
-                    : `Com p = ${fmtP(result.p)} (≥ 0.05), não há evidência estatística suficiente para rejeitar H₀. Isso não confirma H₀ — apenas indica que os dados não são incompatíveis com ela.`}
-                </div>
-              </div>
-            </Card>
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
 
 /* =========================================================================
    PROJECTS TAB  (persisted via window.storage — personal, not shared)
    ========================================================================= */
 function uid() { return "p_" + Date.now().toString(36) + "_" + Math.random().toString(36).slice(2, 8); }
 
-function ProjectsTab({ rows, columns, fileName, testHistory, onOpenProject }) {
+function ProjectsTab({ rows, columns, fileName, onOpenProject }) {
   const [projects, setProjects] = useState([]);
   const [loading, setLoading] = useState(true);
   const [name, setName] = useState("");
@@ -3054,7 +2714,6 @@ function ProjectsTab({ rows, columns, fileName, testHistory, onOpenProject }) {
       createdAt: new Date().toISOString(),
       columns, summary: d,
       sampleRows: rows.slice(0, 300),
-      testHistory: (testHistory || []).slice(-20),
     };
     try {
       const payload = JSON.stringify(project);
@@ -3088,7 +2747,7 @@ function ProjectsTab({ rows, columns, fileName, testHistory, onOpenProject }) {
             <Btn onClick={save} disabled={saving} icon={Plus}>{saving ? "Salvando…" : "Salvar projeto"}</Btn>
             {msg && <div style={{ fontSize: 12.5, color: T[msg.tone] || T.sub, background: msg.tone === "green" ? T.greenSoft : msg.tone === "red" ? T.redSoft : T.amberSoft, padding: 8, borderRadius: 8 }}>{msg.text}</div>}
             <div style={{ fontSize: 11.5, color: T.faint, lineHeight: 1.5, marginTop: 4 }}>
-              <Info size={12} style={{ verticalAlign: -1 }} /> O projeto guarda a base de dados (até 300 linhas de amostra), colunas, indicadores do dashboard e o histórico de testes. Fica salvo apenas no seu navegador/conta — nada é compartilhado.
+              <Info size={12} style={{ verticalAlign: -1 }} /> O projeto guarda a base de dados (até 300 linhas de amostra), colunas e indicadores do dashboard. Fica salvo apenas no seu navegador/conta — nada é compartilhado.
             </div>
           </div>
         </Card>
@@ -3108,7 +2767,6 @@ function ProjectsTab({ rows, columns, fileName, testHistory, onOpenProject }) {
                     <Pill tone="teal">{p.summary?.rowCount} linhas</Pill>
                     <Pill tone="teal">{p.columns?.length} colunas</Pill>
                     <Pill tone={p.summary?.quality >= 80 ? "green" : "amber"}>Qualidade {Math.round(p.summary?.quality || 0)}</Pill>
-                    {p.testHistory?.length > 0 && <Pill tone="amber">{p.testHistory.length} teste(s)</Pill>}
                   </div>
                   <div style={{ fontSize: 11, color: T.faint, marginTop: 6 }}>Salvo em {new Date(p.createdAt).toLocaleString("pt-BR")}</div>
                 </div>
@@ -3128,17 +2786,13 @@ function ProjectsTab({ rows, columns, fileName, testHistory, onOpenProject }) {
 /* =========================================================================
    REPORTS TAB
    ========================================================================= */
-function buildMarkdownReport({ fileName, d, columns, stats, testHistory }) {
+function buildMarkdownReport({ fileName, d, columns, stats }) {
   const lines = [];
   lines.push(`# Relatório de Análise de Dados — ${fileName}`);
   lines.push(`_Gerado em ${new Date().toLocaleString("pt-BR")}_\n`);
   lines.push(`## Resumo Executivo\n`);
   lines.push(`A base contém **${d.rowCount.toLocaleString("pt-BR")} linhas** e **${d.colCount} colunas**, com um score de qualidade de dados de **${Math.round(d.quality)}/100**. `
     + `Foram identificados **${d.missingTotal} valores ausentes** (${fmt(d.missingPct, 1)}%), **${d.duplicates} registros duplicados** e **${d.outlierTotal} outliers** pelo método IQR.\n`);
-  if (testHistory?.length) {
-    const sig = testHistory.filter((t) => t.p < 0.05).length;
-    lines.push(`Foram executados **${testHistory.length} teste(s) estatístico(s)**, dos quais **${sig}** apresentaram resultado estatisticamente significativo (p < 0.05).\n`);
-  }
   lines.push(`## Relatório Técnico\n`);
   lines.push(`### Colunas e tipos\n`);
   lines.push(`| Coluna | Tipo | % Ausente | Únicos |`);
@@ -3149,18 +2803,6 @@ function buildMarkdownReport({ fileName, d, columns, stats, testHistory }) {
     lines.push(`| Variável | N | Média | Mediana | Desvio padrão | CV% | Assimetria | Curtose | Q1 | Q3 |`);
     lines.push(`|---|---|---|---|---|---|---|---|---|---|`);
     stats.forEach((s) => lines.push(`| ${s.name} | ${s.n} | ${fmt(s.mean)} | ${fmt(s.median)} | ${fmt(s.std)} | ${fmt(s.cv, 1)} | ${fmt(s.skew)} | ${fmt(s.kurt)} | ${fmt(s.q1)} | ${fmt(s.q3)} |`));
-  }
-  if (testHistory?.length) {
-    lines.push(`\n## Relatório Estatístico — Testes de Hipótese\n`);
-    testHistory.forEach((t, i) => {
-      lines.push(`### ${i + 1}. ${t.name}`);
-      lines.push(`- Estatística (${t.statLabel}): ${fmt(t.statistic, 4)}`);
-      if (t.df !== null && t.df !== undefined) lines.push(`- Graus de liberdade: ${typeof t.df === "number" ? fmt(t.df, 1) : t.df}`);
-      lines.push(`- p-valor: ${fmtP(t.p)}`);
-      lines.push(`- Decisão (α=0.05): ${t.p < 0.05 ? "Rejeita H₀" : "Não rejeita H₀"}`);
-      lines.push(`- H₀: ${t.def.h0}`);
-      lines.push(`- H₁: ${t.def.h1}\n`);
-    });
   }
   lines.push(`## Plano de ação sugerido\n`);
   const actions = [];
@@ -3270,24 +2912,8 @@ function TimelineStep({ C, icon: Icon, title, description, status }) {
   );
 }
 
-function ConfidenceBar({ C, p }) {
-  const confidence = Math.max(0, Math.min(100, (1 - p) * 100));
-  const tone = p < 0.01 ? "green" : p < 0.05 ? "teal" : "amber";
-  const color = tone === "teal" ? C.teal : C[tone];
-  return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 10.5, color: C.faint, marginBottom: 3, fontFamily: "'JetBrains Mono', monospace" }}>
-        <span>Confiança estatística</span><span>{fmt(confidence, 1)}%</span>
-      </div>
-      <div style={{ background: C.border, borderRadius: 999, height: 6, overflow: "hidden" }}>
-        <div style={{ width: `${confidence}%`, height: "100%", background: color, borderRadius: 999, transition: "width 0.6s ease" }} />
-      </div>
-    </div>
-  );
-}
-
 /* --- Reports: export helpers (formatting only — same source data/calcs) --- */
-function exportExcelReport({ fileName, d, columns, stats, testHistory }) {
+function exportExcelReport({ fileName, d, columns, stats }) {
   const wb = XLSX.utils.book_new();
   const resumo = [
     ["Indicador", "Valor"],
@@ -3298,7 +2924,6 @@ function exportExcelReport({ fileName, d, columns, stats, testHistory }) {
     ["Valores ausentes (%)", fmt(d.missingPct, 1)],
     ["Duplicados", d.duplicates],
     ["Outliers (IQR)", d.outlierTotal],
-    ["Testes executados", testHistory?.length || 0],
     ["Gerado em", new Date().toLocaleString("pt-BR")],
   ];
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(resumo), "Resumo");
@@ -3308,11 +2933,6 @@ function exportExcelReport({ fileName, d, columns, stats, testHistory }) {
     const statRows = [["Variável", "N", "Média", "Mediana", "Desvio padrão", "CV%", "Assimetria", "Curtose", "Q1", "Q3"],
       ...stats.map((s) => [s.name, s.n, fmt(s.mean), fmt(s.median), fmt(s.std), fmt(s.cv, 1), fmt(s.skew), fmt(s.kurt), fmt(s.q1), fmt(s.q3)])];
     XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(statRows), "Estatistica");
-  }
-  if (testHistory?.length) {
-    const testRows = [["Teste", "Estatística", "p-valor", "Decisão (α=0.05)"],
-      ...testHistory.map((t) => [t.name, fmt(t.statistic, 4), fmtP(t.p), t.p < 0.05 ? "Rejeita H0" : "Não rejeita H0"])];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(testRows), "Testes");
   }
   XLSX.writeFile(wb, `relatorio_${(fileName || "analise").replace(/\.[^.]+$/, "").replace(/[^\w\-]+/g, "_")}.xlsx`);
 }
@@ -3356,7 +2976,7 @@ td{border:1px solid #E3E6EB;padding:6px 10px;} .muted{color:#9AA1AE;font-size:13
    REPORTS TAB — BI-grade visual redesign (Power BI / Tableau style)
    Calculations, stats and test logic are 100% unchanged from before.
    ========================================================================= */
-function ReportsTab({ rows, columns, fileName, testHistory }) {
+function ReportsTab({ rows, columns, fileName }) {
   const [theme, setTheme] = useState("light");
   const C = theme === "dark" ? REPORT_DARK : T;
   const d = useMemo(() => computeDashboard(rows, columns), [rows, columns]);
@@ -3367,10 +2987,9 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
     return { name: c.name, n: vals.length, mean: mean(vals), median: median(vals), std: std(vals), cv: cv(vals), skew: skewness(vals), kurt: kurtosisExcess(vals), ...quartiles(vals) };
   }), [rows, numericCols.map((c) => c.name).join(",")]);
 
-  const markdown = useMemo(() => buildMarkdownReport({ fileName, d, columns, stats, testHistory }), [fileName, d, columns, stats, testHistory]);
+  const markdown = useMemo(() => buildMarkdownReport({ fileName, d, columns, stats }), [fileName, d, columns, stats]);
 
   const insightToneMap = { amber: "warning", green: "success", teal: "info", neutral: "info", red: "warning" };
-  const significantTests = (testHistory || []).filter((t) => t.p < 0.05);
   const relevantCorrelations = d.topCorrelations.filter((p) => Math.abs(p.r) > 0.5);
 
   const actions = [];
@@ -3411,7 +3030,7 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
             {theme === "light" ? <Moon size={15} color={C.ink} /> : <Sun size={15} color={C.ink} />}
           </button>
           <Btn variant="ghost" icon={Download} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => downloadBlob(markdown, "relatorio_analise.md", "text/markdown")}>Markdown</Btn>
-          <Btn variant="ghost" icon={FileSpreadsheet} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => exportExcelReport({ fileName, d, columns, stats, testHistory })}>Excel</Btn>
+          <Btn variant="ghost" icon={FileSpreadsheet} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => exportExcelReport({ fileName, d, columns, stats })}>Excel</Btn>
           <Btn variant="ghost" icon={FileCode} style={{ background: "transparent", color: C.ink, borderColor: C.border }} onClick={() => downloadBlob(buildHtmlReport(markdown, fileName), "relatorio_analise.html", "text/html")}>HTML</Btn>
           <Btn icon={Printer} onClick={() => window.print()}>PDF</Btn>
         </div>
@@ -3424,7 +3043,6 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
         <KpiCard C={C} icon={TrendingUp} label="Variáveis numéricas" value={numericCols.length} sub={`de ${d.colCount} colunas`} />
         <KpiCard C={C} icon={AlertTriangle} label="Outliers (IQR)" value={d.outlierTotal} tone={d.outlierTotal > 0 ? "amber" : "green"} />
         <KpiCard C={C} icon={Activity} label="Correlações relevantes" value={relevantCorrelations.length} sub="|r| > 0.5" tone={relevantCorrelations.length ? "teal" : "neutral"} />
-        <KpiCard C={C} icon={FlaskConical} label="Testes executados" value={testHistory?.length || 0} sub={`${significantTests.length} significativo(s)`} tone={significantTests.length ? "green" : "neutral"} />
       </div>
 
       {/* RESUMO EXECUTIVO */}
@@ -3449,8 +3067,6 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
           description={`Score de qualidade ${Math.round(d.quality)}/100 — ${fmt(d.missingPct, 1)}% de ausentes, ${d.duplicates} duplicado(s), ${d.outlierTotal} outlier(s).`} />
         <TimelineStep C={C} icon={BarChart3} status="done" title="Exploração de dados (EDA)"
           description={`Distribuições, correlações e séries temporais analisadas. ${d.topCorrelations.length ? `Correlação mais forte: ${d.topCorrelations[0].a} × ${d.topCorrelations[0].b} (r=${fmt(d.topCorrelations[0].r, 2)}).` : "Sem colunas numéricas suficientes para correlação."}`} />
-        <TimelineStep C={C} icon={FlaskConical} status={testHistory?.length ? "done" : "warn"} title="Testes de hipótese"
-          description={testHistory?.length ? `${testHistory.length} teste(s) executado(s), ${significantTests.length} com resultado significativo (p<0.05).` : "Nenhum teste de hipótese executado ainda — disponível na aba Testes."} />
         <TimelineStep C={C} icon={Lightbulb} status="done" title="Conclusões e recomendações"
           description="Plano de ação sugerido gerado automaticamente a partir dos indicadores acima." />
       </div>
@@ -3510,44 +3126,9 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
         ) : <div style={{ color: C.sub, fontSize: 13 }}>Nenhuma coluna numérica encontrada.</div>}
       </ReportAccordion>
 
-      <ReportAccordion C={C} icon={FlaskConical} title="Testes de hipótese executados" subtitle={`${testHistory?.length || 0} teste(s) no histórico desta sessão`}>
-        {testHistory?.length ? (
-          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {testHistory.map((t, i) => (
-              <div key={i} style={{ border: `1px solid ${C.border}`, borderRadius: 10, padding: 14 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, flexWrap: "wrap", gap: 8 }}>
-                  <div style={{ fontWeight: 700, fontSize: 13, color: C.ink }}>{i + 1}. {t.name}</div>
-                  <Pill tone={t.p < 0.05 ? "green" : "amber"}>{t.p < 0.05 ? "Rejeita H₀" : "Não rejeita H₀"}</Pill>
-                </div>
-                <div style={{ fontSize: 12, color: C.sub, marginBottom: 10 }}>
-                  {t.statLabel} = {fmt(t.statistic, 3)} {t.df !== null && t.df !== undefined && `· gl = ${typeof t.df === "number" ? fmt(t.df, 1) : t.df}`} · p = {fmtP(t.p)}
-                </div>
-                <ConfidenceBar C={C} p={t.p} />
-              </div>
-            ))}
-          </div>
-        ) : <div style={{ color: C.sub, fontSize: 13 }}>Nenhum teste executado ainda. Vá até a aba <b>Testes de Hipótese</b> para rodar análises inferenciais.</div>}
-      </ReportAccordion>
-
       <ReportDivider C={C} label="Conclusões & recomendações" />
 
       <div className="rpt-fade" style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16, marginBottom: 8 }}>
-        <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20 }}>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
-            <ClipboardList size={16} color={C.teal} />
-            <div style={{ fontWeight: 700, fontSize: 14, color: C.ink }}>Resultados estatísticos</div>
-          </div>
-          {testHistory?.length ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {testHistory.map((t, i) => (
-                <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: C.ink }}>
-                  {t.p < 0.05 ? <CheckCircle2 size={14} color={C.green} style={{ flexShrink: 0 }} /> : <XCircle size={14} color={C.amber} style={{ flexShrink: 0 }} />}
-                  <span>{t.name} — p={fmtP(t.p)}</span>
-                </div>
-              ))}
-            </div>
-          ) : <div style={{ color: C.sub, fontSize: 12.5 }}>Sem testes estatísticos executados nesta sessão.</div>}
-        </div>
         <div style={{ background: C.panel, border: `1px solid ${C.border}`, borderRadius: 16, padding: 20 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14 }}>
             <Lightbulb size={16} color={C.amber} />
@@ -3571,13 +3152,181 @@ function ReportsTab({ rows, columns, fileName, testHistory }) {
 }
 
 /* =========================================================================
+   BIBLIOTECAS DE ANÁLISE AUTOMÁTICA (backend Python)
+   Cada aba consome a mesma base carregada uma única vez (backendSessionId),
+   via a API Python hospedada separadamente (ver /backend no repositório).
+   ========================================================================= */
+function LibraryStatusNotice({ backendStatus }) {
+  if (backendStatus === "uploading") {
+    return (
+      <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>
+        Enviando a base para o servidor de análise (Python)…
+      </Card>
+    );
+  }
+  if (backendStatus === "error" || backendStatus === "idle") {
+    return (
+      <div style={{ background: T.amberSoft, color: T.amber, padding: "14px 16px", borderRadius: 10, fontSize: 13.5, display: "flex", gap: 8, alignItems: "flex-start" }}>
+        <AlertTriangle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
+        Não foi possível conectar ao servidor de análise em Python para esta biblioteca. As demais abas do AnálisePro continuam funcionando normalmente — tente novamente carregando a base outra vez.
+      </div>
+    );
+  }
+  return null;
+}
+
+// Usa fetch para buscar JSON do backend para um dado endpoint + sessão.
+function useBackendJson(endpoint, sessionId) {
+  const [state, setState] = useState({ status: "idle", data: null, error: null });
+  useEffect(() => {
+    if (!sessionId) { setState({ status: "idle", data: null, error: null }); return; }
+    let cancelled = false;
+    setState({ status: "loading", data: null, error: null });
+    fetch(`${API_BASE}/api/${endpoint}/${sessionId}`)
+      .then((res) => { if (!res.ok) throw new Error(`O servidor respondeu com erro ${res.status}.`); return res.json(); })
+      .then((data) => { if (!cancelled) setState({ status: "ready", data, error: null }); })
+      .catch((err) => { if (!cancelled) setState({ status: "error", data: null, error: err.message }); });
+    return () => { cancelled = true; };
+  }, [endpoint, sessionId]);
+  return state;
+}
+
+// Abas cujo backend devolve HTML pronto (o navegador carrega direto via <iframe src>).
+function IframeReportTab({ eyebrow, title, subtitle, endpoint, sessionId, backendStatus }) {
+  const [loaded, setLoaded] = useState(false);
+  useEffect(() => { setLoaded(false); }, [sessionId]);
+  return (
+    <div>
+      <SectionTitle eyebrow={eyebrow} title={title} right={sessionId && (
+        <Btn variant="ghost" icon={ExternalLink} onClick={() => window.open(`${API_BASE}/api/${endpoint}/${sessionId}`, "_blank")}>Abrir em nova aba</Btn>
+      )} />
+      {subtitle && <div style={{ fontSize: 12.5, color: T.sub, marginTop: -10, marginBottom: 16 }}>{subtitle}</div>}
+      {!sessionId ? <LibraryStatusNotice backendStatus={backendStatus} /> : (
+        <Card style={{ padding: 0, overflow: "hidden", minHeight: 560 }}>
+          {!loaded && <div style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Gerando relatório… isso pode levar alguns segundos na primeira vez.</div>}
+          <iframe title={title} src={`${API_BASE}/api/${endpoint}/${sessionId}`} onLoad={() => setLoaded(true)}
+            style={{ width: "100%", height: 720, border: "none", display: loaded ? "block" : "none" }} />
+        </Card>
+      )}
+    </div>
+  );
+}
+
+function YdataProfilingTab({ sessionId, backendStatus }) {
+  return <IframeReportTab eyebrow="ydata-profiling" title="Relatório completo de EDA" subtitle="Perfil estatístico completo da base — tipos, distribuições, correlações, valores ausentes e alertas de qualidade." endpoint="ydata-profiling" sessionId={sessionId} backendStatus={backendStatus} />;
+}
+function SweetvizTab({ sessionId, backendStatus }) {
+  return <IframeReportTab eyebrow="Sweetviz" title="Relatório visual e comparação de variáveis" subtitle="Visão visual das variáveis da base, com histogramas, associações e comparação entre colunas." endpoint="sweetviz" sessionId={sessionId} backendStatus={backendStatus} />;
+}
+function SkimpyTab({ sessionId, backendStatus }) {
+  return <IframeReportTab eyebrow="skimpy" title="Resumo estatístico do DataFrame" subtitle="Resumo compacto por coluna: tipo, ausentes, média, desvio padrão e distribuição." endpoint="skimpy" sessionId={sessionId} backendStatus={backendStatus} />;
+}
+
+function AutoVizTab({ sessionId, backendStatus }) {
+  const { status, data, error } = useBackendJson("autoviz", sessionId);
+  return (
+    <div>
+      <SectionTitle eyebrow="AutoViz" title="Geração automática de gráficos" />
+      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
+      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Gerando gráficos automaticamente com AutoViz…</Card>}
+      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar os gráficos: {error}</div>}
+      {sessionId && status === "ready" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(360px, 1fr))", gap: 16 }}>
+          {(data.images || []).map((src, i) => (
+            <Card key={i} style={{ padding: 12 }}><img src={src} alt={`AutoViz ${i + 1}`} style={{ width: "100%", borderRadius: 8 }} /></Card>
+          ))}
+          {!data.images?.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhum gráfico gerado para esta base.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MissingnoTab({ sessionId, backendStatus }) {
+  const { status, data, error } = useBackendJson("missingno", sessionId);
+  const charts = [
+    { key: "matrix", label: "Matriz de ausentes" },
+    { key: "bar", label: "Barras — completude por coluna" },
+    { key: "heatmap", label: "Correlação de ausência entre colunas" },
+  ];
+  return (
+    <div>
+      <SectionTitle eyebrow="missingno" title="Análise e visualização de valores ausentes" />
+      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
+      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Gerando visualizações de dados ausentes…</Card>}
+      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar as visualizações: {error}</div>}
+      {sessionId && status === "ready" && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+          {charts.map((c) => data[c.key] && (
+            <Card key={c.key} style={{ padding: 16 }}>
+              <div style={{ fontWeight: 700, fontSize: 13.5, color: T.ink, marginBottom: 10 }}>{c.label}</div>
+              <img src={data[c.key]} alt={c.label} style={{ width: "100%", borderRadius: 8 }} />
+            </Card>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LuxTab({ sessionId, backendStatus }) {
+  const { status, data, error } = useBackendJson("lux", sessionId);
+  return (
+    <div>
+      <SectionTitle eyebrow="Lux" title="Sugestão automática de visualizações" />
+      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
+      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Calculando recomendações de visualização com Lux…</Card>}
+      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao gerar recomendações: {error}</div>}
+      {sessionId && status === "ready" && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(320px, 1fr))", gap: 16 }}>
+          {(data.recommendations || []).map((rec, i) => (
+            <Card key={i} style={{ padding: 14 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: T.ink, marginBottom: 8 }}>{rec.name}</div>
+              {rec.image ? <img src={rec.image} alt={rec.name} style={{ width: "100%", borderRadius: 8 }} /> : (
+                <div style={{ fontSize: 12.5, color: T.sub }}>{rec.description}</div>
+              )}
+            </Card>
+          ))}
+          {!data.recommendations?.length && <div style={{ color: T.sub, fontSize: 13 }}>Nenhuma recomendação disponível para esta base.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DTaleTab({ sessionId, backendStatus }) {
+  const { status, data, error } = useBackendJson("dtale", sessionId);
+  return (
+    <div>
+      <SectionTitle eyebrow="D-Tale" title="Exploração interativa dos dados" right={status === "ready" && data?.url && (
+        <Btn variant="ghost" icon={ExternalLink} onClick={() => window.open(data.url, "_blank")}>Abrir em nova aba</Btn>
+      )} />
+      {!sessionId && <LibraryStatusNotice backendStatus={backendStatus} />}
+      {sessionId && status === "loading" && <Card style={{ padding: 24, textAlign: "center", color: T.sub, fontSize: 13.5 }}>Iniciando sessão interativa do D-Tale…</Card>}
+      {sessionId && status === "error" && <div style={{ background: T.redSoft, color: T.red, padding: 14, borderRadius: 10, fontSize: 13.5 }}>Falha ao iniciar o D-Tale: {error}</div>}
+      {sessionId && status === "ready" && data?.url && (
+        <Card style={{ padding: 0, overflow: "hidden" }}>
+          <iframe title="D-Tale" src={data.url} style={{ width: "100%", height: 720, border: "none" }} />
+        </Card>
+      )}
+    </div>
+  );
+}
+
+/* =========================================================================
    MAIN APP
    ========================================================================= */
 const NAV = [
   { id: "dashboard", label: "Dashboard", icon: LayoutDashboard },
   { id: "eda", label: "Exploração (EDA)", icon: BarChart3 },
   { id: "stats", label: "Estatística Descritiva", icon: Sigma },
-  { id: "tests", label: "Testes de Hipótese", icon: FlaskConical },
+  { id: "ydata", label: "ydata-profiling", icon: FileBarChart2 },
+  { id: "sweetviz", label: "Sweetviz", icon: GitCompare },
+  { id: "autoviz", label: "AutoViz", icon: Wand2 },
+  { id: "dtale", label: "D-Tale", icon: Table2 },
+  { id: "lux", label: "Lux", icon: Lightbulb },
+  { id: "skimpy", label: "skimpy", icon: ListChecks },
+  { id: "missingno", label: "missingno", icon: Grid2x2 },
   { id: "projects", label: "Projetos", icon: FolderKanban },
   { id: "reports", label: "Relatórios", icon: FileText },
 ];
@@ -3587,13 +3336,33 @@ function AnalisePro() {
   const [rows, setRows] = useState([]);
   const [fileName, setFileName] = useState("");
   const [activeTab, setActiveTab] = useState("dashboard");
-  const [testHistory, setTestHistory] = useState([]);
 
-  const handleLoaded = useCallback((data, name) => {
+  const [backendSessionId, setBackendSessionId] = useState(null);
+  const [backendStatus, setBackendStatus] = useState("idle"); // idle | uploading | ready | error
+
+  const handleLoaded = useCallback((data, name, file) => {
     const cols = inferColumns(data);
     const typed = buildTypedRows(data, cols);
     setColumns(cols); setRows(typed); setFileName(name);
-    setTestHistory([]); setActiveTab("dashboard");
+    setActiveTab("dashboard");
+
+    // Envia o arquivo original ao backend Python para alimentar as abas de
+    // bibliotecas (ydata-profiling, Sweetviz, AutoViz, D-Tale, Lux, skimpy,
+    // missingno). Isso é independente da análise client-side acima — se o
+    // backend falhar ou estiver indisponível, o restante do app continua
+    // funcionando normalmente.
+    setBackendSessionId(null);
+    if (file) {
+      setBackendStatus("uploading");
+      const form = new FormData();
+      form.append("file", file);
+      fetch(`${API_BASE}/api/upload`, { method: "POST", body: form })
+        .then((res) => { if (!res.ok) throw new Error("Upload falhou (" + res.status + ")"); return res.json(); })
+        .then((json) => { setBackendSessionId(json.session_id); setBackendStatus("ready"); })
+        .catch(() => setBackendStatus("error"));
+    } else {
+      setBackendStatus("error");
+    }
   }, []);
 
   const handleOpenProject = useCallback((p) => {
@@ -3607,7 +3376,6 @@ function AnalisePro() {
       return out;
     });
     setColumns(cols); setRows(typed); setFileName(p.fileName + " (projeto: " + p.name + ")");
-    setTestHistory(p.testHistory || []);
     setActiveTab("dashboard");
   }, []);
 
@@ -3651,7 +3419,7 @@ function AnalisePro() {
             <div style={{ fontSize: 11, color: T.faint, fontWeight: 600, textTransform: "uppercase" }}>Base ativa</div>
             <div style={{ fontSize: 12.5, color: T.ink, fontWeight: 600, marginTop: 4, wordBreak: "break-word" }}>{fileName}</div>
             <div style={{ fontSize: 11.5, color: T.sub, marginTop: 2 }}>{rows.length.toLocaleString("pt-BR")} linhas · {columns.length} colunas</div>
-            <Btn variant="ghost" style={{ marginTop: 10, width: "100%", justifyContent: "center" }} onClick={() => { setRows([]); setColumns([]); setFileName(""); setActiveTab("dashboard"); }}>Trocar base</Btn>
+            <Btn variant="ghost" style={{ marginTop: 10, width: "100%", justifyContent: "center" }} onClick={() => { setRows([]); setColumns([]); setFileName(""); setActiveTab("dashboard"); setBackendSessionId(null); setBackendStatus("idle"); }}>Trocar base</Btn>
           </div>
         )}
       </div>
@@ -3660,14 +3428,20 @@ function AnalisePro() {
       <div style={{ flex: 1, padding: 28, overflow: "auto", maxHeight: "90vh" }}>
         {!hasData && activeTab !== "projects" && <UploadView onLoaded={handleLoaded} />}
         {!hasData && activeTab === "projects" && (
-          <ProjectsTab rows={[]} columns={[]} fileName="" testHistory={[]} onOpenProject={handleOpenProject} />
+          <ProjectsTab rows={[]} columns={[]} fileName="" onOpenProject={handleOpenProject} />
         )}
-        {hasData && activeTab === "dashboard" && <DashboardTab rows={rows} columns={columns} fileName={fileName} testHistory={testHistory} onTestRun={(t) => setTestHistory((h) => [...h, t])} />}
+        {hasData && activeTab === "dashboard" && <DashboardTab rows={rows} columns={columns} fileName={fileName} />}
         {hasData && activeTab === "eda" && <EDATab rows={rows} columns={columns} />}
         {hasData && activeTab === "stats" && <DescriptiveTab rows={rows} columns={columns} />}
-        {hasData && activeTab === "tests" && <TestsTab rows={rows} columns={columns} onTestRun={(t) => setTestHistory((h) => [...h, t])} />}
-        {hasData && activeTab === "projects" && <ProjectsTab rows={rows} columns={columns} fileName={fileName} testHistory={testHistory} onOpenProject={handleOpenProject} />}
-        {hasData && activeTab === "reports" && <ReportsTab rows={rows} columns={columns} fileName={fileName} testHistory={testHistory} />}
+        {hasData && activeTab === "ydata" && <YdataProfilingTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "sweetviz" && <SweetvizTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "autoviz" && <AutoVizTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "dtale" && <DTaleTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "lux" && <LuxTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "skimpy" && <SkimpyTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "missingno" && <MissingnoTab sessionId={backendSessionId} backendStatus={backendStatus} />}
+        {hasData && activeTab === "projects" && <ProjectsTab rows={rows} columns={columns} fileName={fileName} onOpenProject={handleOpenProject} />}
+        {hasData && activeTab === "reports" && <ReportsTab rows={rows} columns={columns} fileName={fileName} />}
       </div>
     </div>
   );
