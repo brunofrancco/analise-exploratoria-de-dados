@@ -249,7 +249,10 @@ def autoviz_report(session_id: str):
             depVar="",
             dfte=None,
             header=0,
-            verbose=0,
+            # verbose=2 é o que faz o AutoViz de fato salvar os gráficos em
+            # disco (como PNG) em vez de apenas exibi-los inline — com
+            # verbose=0/1 nada é gravado em save_plot_dir.
+            verbose=2,
             lowess=False,
             chart_format="png",
             max_rows_analyzed=min(len(df), 150000),
